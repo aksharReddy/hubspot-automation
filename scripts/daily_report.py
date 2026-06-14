@@ -11,19 +11,23 @@ from fpdf import FPDF, XPos, YPos
 
 
 def pdf_safe(text):
-    return (str(text)
-            .replace(‘–‘, ‘-’).replace(‘—‘, ‘-’)
-            .replace(‘’’, “’”).replace(‘‘’, “’”)
-            .replace(‘“’, ‘”’).replace(‘”’, ‘”’)
-            .encode(‘latin-1’, errors=’replace’).decode(‘latin-1’))
+    t = str(text)
+    char_map = {
+        '-': '-', '-': '-',
+        ''': "'", ''': "'",
+        '"': '"', '"': '"',
+    }
+    for src, dst in char_map.items():
+        t = t.replace(src, dst)
+    return t.encode('latin-1', errors='replace').decode('latin-1')
 
 
 def strip_markdown(text):
-    “””Remove markdown symbols the AI might emit.”””
-    text = re.sub(r’^#{1,6}\s*’, ‘’, text, flags=re.MULTILINE)
-    text = re.sub(r’\*\*(.+?)\*\*’, r’\1’, text)
-    text = re.sub(r’\*(.+?)\*’, r’\1’, text)
-    text = re.sub(r’`(.+?)`’, r’\1’, text)
+    """Remove markdown symbols the AI might emit."""
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
     return text
 
 HUBSPOT_TOKEN      = os.environ['HUBSPOT_TOKEN']
@@ -199,7 +203,7 @@ def build_ai_context(companies, tickets, deals, ticket_company_map):
 
     for c in customers:
         p    = c['properties']
-        name = p.get('name', '—')
+        name = p.get('name', '-')
         days = last_activity(c)
         call = (p.get('hs_last_logged_call_date') or '')[:10] or 'never called'
         cid  = str(c['id'])
@@ -225,7 +229,7 @@ def build_ai_context(companies, tickets, deals, ticket_company_map):
     lines += ['', '--- SALES OPPORTUNITIES SILENT 30d+ ---']
     for c in silent_opps:
         p    = c['properties']
-        name = p.get('name', '—')
+        name = p.get('name', '-')
         days = last_activity(c)
         call = (p.get('hs_last_logged_call_date') or '')[:10] or 'never called'
         lines.append(f'- {name}: {days}d silent | last call: {call}')
@@ -297,7 +301,7 @@ def format_html(data, ai_insight):
         col  = 'red' if days >= 60 else 'yellow'
         critical_rows += (
             f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #fef2f2;font-size:13px;color:#1e293b;font-weight:500;">{p.get("name","—")}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #fef2f2;font-size:13px;color:#1e293b;font-weight:500;">{p.get("name","-")}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #fef2f2;text-align:center;">{badge(f"{days}d silent", col)}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #fef2f2;font-size:12px;color:#64748b;">{call}</td>'
             f'</tr>'
@@ -311,7 +315,7 @@ def format_html(data, ai_insight):
         call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
         hot_rows += (
             f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:13px;color:#1e293b;font-weight:500;">{p.get("name","—")}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:13px;color:#1e293b;font-weight:500;">{p.get("name","-")}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;text-align:center;">{badge(f"{days}d silent", "yellow")}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:12px;color:#64748b;">{call}</td>'
             f'</tr>'
@@ -325,7 +329,7 @@ def format_html(data, ai_insight):
         col = 'red' if pri == 'HIGH' else 'yellow'
         ticket_rows += (
             f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;">{p.get("subject","—")}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;">{p.get("subject","-")}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;text-align:center;">{badge(pri, col)}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;text-align:center;">{age}d</td>'
             f'</tr>'
@@ -333,7 +337,7 @@ def format_html(data, ai_insight):
 
     closed_html = ''
     for d in pip['closed_won_list']:
-        closed_html += f'<li style="margin:4px 0;font-size:13px;color:#166534;">&#10003; {d["properties"].get("dealname","—")}</li>'
+        closed_html += f'<li style="margin:4px 0;font-size:13px;color:#166534;">&#10003; {d["properties"].get("dealname","-")}</li>'
     if closed_html:
         closed_html = f'<ul style="margin:10px 0 0;padding-left:20px;">{closed_html}</ul>'
 
@@ -347,7 +351,7 @@ def format_html(data, ai_insight):
 
     pip_left  = ''.join([stat_row(*x) for x in [
         ('Active (last 14d)', pip['active']),
-        ('Follow up (14–30d)', pip['follow_up']),
+        ('Follow up (14-30d)', pip['follow_up']),
         ('Silent 30d+', pip['silent']),
     ]])
     pip_right = ''.join([stat_row(*x) for x in [
@@ -366,7 +370,7 @@ def format_html(data, ai_insight):
         elif s[:2] in ('1.', '2.', '3.'):
             ai_html += (f'<p style="margin:14px 0 5px;font-size:12px;font-weight:700;'
                         f'color:#0f2744;text-transform:uppercase;letter-spacing:0.5px;">{s}</p>')
-        elif s.startswith('-') or s.startswith('•'):
+        elif s.startswith('-') or s.startswith('-'):
             ai_html += (f'<p style="margin:3px 0 3px 12px;font-size:13px;color:#1e3a5f;line-height:1.6;">'
                         f'{s}</p>')
         else:
@@ -451,7 +455,7 @@ def format_html(data, ai_insight):
       <tr><td style="height:6px;"></td></tr>
       <tr><td style="padding:8px 14px;background:#fffbeb;border-radius:8px;">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
-          <td style="font-size:13px;color:#b45309;">&#11044; At Risk 14–30 days</td>
+          <td style="font-size:13px;color:#b45309;">&#11044; At Risk 14-30 days</td>
           <td style="text-align:right;font-size:18px;font-weight:700;color:#b45309;">{cus['at_risk']}</td>
         </tr></table>
       </td></tr>
@@ -615,7 +619,7 @@ def format_pdf(data, ai_insight):
             p    = c['properties']
             days = la(c)
             call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
-            pdf.tbl_row([(p.get('name', '—'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
+            pdf.tbl_row([(p.get('name', '-'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
 
     pdf.ln(4)
     pdf.section_title('SALES PIPELINE')
@@ -638,7 +642,7 @@ def format_pdf(data, ai_insight):
             p    = c['properties']
             days = la_pip(c)
             call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
-            pdf.tbl_row([(p.get('name', '—'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
+            pdf.tbl_row([(p.get('name', '-'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
 
     pdf.ln(4)
     pdf.section_title(f'OPEN SUPPORT TICKETS ({tix["open"]})')
@@ -652,7 +656,7 @@ def format_pdf(data, ai_insight):
         for i, t in enumerate(tix['list']):
             p   = t['properties']
             age = days_since(p.get('createdate'))
-            pdf.tbl_row([(p.get('subject', '—'), 110),
+            pdf.tbl_row([(p.get('subject', '-'), 110),
                          (p.get('hs_ticket_priority', '?'), 35),
                          (f'{age}d', 41)], shade=(i % 2 == 1))
 
@@ -671,7 +675,7 @@ def format_pdf(data, ai_insight):
             pdf.ln(4)
             pdf.set_font('Helvetica', 'B', 9)
             pdf.set_text_color(15, 39, 68)
-        elif s.startswith('-') or s.startswith('•'):
+        elif s.startswith('-') or s.startswith('-'):
             pdf.set_font('Helvetica', '', 9)
             pdf.set_text_color(30, 58, 138)
         else:
@@ -727,5 +731,5 @@ if __name__ == '__main__':
     pdf  = format_pdf(data, insight)
 
     print('Sending email...')
-    send_email(f"NirogGyan Daily Pulse — {data['date']}", html, pdf, data['date'])
+    send_email(f"NirogGyan Daily Pulse - {data['date']}", html, pdf, data['date'])
     print('Done. Email sent with PDF attachment.')
