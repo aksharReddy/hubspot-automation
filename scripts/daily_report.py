@@ -6,7 +6,15 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from fpdf import FPDF
+from fpdf import FPDF, XPos, YPos
+
+
+def pdf_safe(text):
+    return (str(text)
+            .replace('–', '-').replace('—', '-')
+            .replace('‘', "'").replace('’', "'")
+            .replace('“', '"').replace('”', '"')
+            .encode('latin-1', errors='replace').decode('latin-1'))
 
 HUBSPOT_TOKEN      = os.environ['HUBSPOT_TOKEN']
 GROQ_API_KEY       = os.environ['GROQ_API_KEY']
@@ -494,24 +502,24 @@ class PulsePDF(FPDF):
         self.set_font('Helvetica', 'B', 14)
         self.set_text_color(255, 255, 255)
         self.set_xy(12, 6)
-        self.cell(0, 10, 'NirogGyan Daily Pulse', ln=False)
+        self.cell(0, 10, 'NirogGyan Daily Pulse', new_x=XPos.RIGHT, new_y=YPos.TOP)
         self.set_font('Helvetica', '', 9)
         self.set_text_color(180, 200, 220)
         self.set_xy(12, 14)
-        self.cell(0, 6, 'Auto-generated report', ln=True)
+        self.cell(0, 6, 'Auto-generated report', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     def footer(self):
         self.set_y(-12)
         self.set_font('Helvetica', 'I', 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 8, f'NirogGyan Daily Pulse — {NOW.strftime("%d %B %Y")}', align='C')
+        self.cell(0, 8, f'NirogGyan Daily Pulse - {NOW.strftime("%d %B %Y")}', align='C')
 
     def section_title(self, title):
         self.ln(4)
         self.set_fill_color(240, 244, 248)
         self.set_font('Helvetica', 'B', 9)
         self.set_text_color(15, 39, 68)
-        self.cell(0, 8, f'  {title}', ln=True, fill=True)
+        self.cell(0, 8, pdf_safe(f'  {title}'), new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
         self.ln(2)
 
     def kv_row(self, label, value, highlight=False):
@@ -520,17 +528,17 @@ class PulsePDF(FPDF):
             self.set_fill_color(254, 242, 242)
         self.set_font('Helvetica', '', 10)
         self.set_text_color(71, 85, 105)
-        self.cell(110, 7, f'  {label}', fill=fill)
+        self.cell(110, 7, pdf_safe(f'  {label}'), fill=fill)
         self.set_font('Helvetica', 'B', 10)
         self.set_text_color(15, 39, 68)
-        self.cell(0, 7, str(value), ln=True, fill=fill)
+        self.cell(0, 7, pdf_safe(str(value)), new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=fill)
 
     def tbl_header(self, cols):
         self.set_fill_color(248, 250, 252)
         self.set_font('Helvetica', 'B', 8)
         self.set_text_color(100, 116, 139)
         for col, w in cols:
-            self.cell(w, 7, col, fill=True, border='B')
+            self.cell(w, 7, pdf_safe(col), fill=True, border='B')
         self.ln()
 
     def tbl_row(self, cells, shade=False):
@@ -539,7 +547,7 @@ class PulsePDF(FPDF):
         self.set_font('Helvetica', '', 9)
         self.set_text_color(30, 41, 59)
         for text, w in cells:
-            self.cell(w, 7, str(text)[:55], fill=shade)
+            self.cell(w, 7, pdf_safe(str(text)[:55]), fill=shade)
         self.ln()
 
 
@@ -557,7 +565,7 @@ def format_pdf(data, ai_insight):
 
     pdf.set_font('Helvetica', '', 10)
     pdf.set_text_color(100, 116, 139)
-    pdf.cell(0, 7, data['date'], ln=True)
+    pdf.cell(0, 7, pdf_safe(data['date']), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(2)
 
     pdf.set_fill_color(15, 39, 68)
@@ -571,7 +579,7 @@ def format_pdf(data, ai_insight):
 
     pdf.section_title('CLIENT HEALTH')
     pdf.kv_row('Healthy  (< 14 days)', cus['healthy'])
-    pdf.kv_row('At Risk  (14–30 days)', cus['at_risk'])
+    pdf.kv_row('At Risk  (14-30 days)', cus['at_risk'])
     pdf.kv_row('Critical (30+ days)', cus['critical'], highlight=(cus['critical'] > 0))
 
     if cus['critical_list']:
@@ -588,7 +596,7 @@ def format_pdf(data, ai_insight):
 
     pdf.section_title('SALES PIPELINE')
     for label, val in [('Active (last 14d)', pip['active']),
-                       ('Follow up (14–30d)', pip['follow_up']),
+                       ('Follow up (14-30d)', pip['follow_up']),
                        ('Silent 30d+', pip['silent']),
                        ('New leads (7d)', pip['new_leads']),
                        ('New deals (30d)', pip['new_deals']),
@@ -635,7 +643,7 @@ def format_pdf(data, ai_insight):
         else:
             pdf.set_font('Helvetica', '', 9)
             pdf.set_text_color(30, 58, 138)
-        pdf.multi_cell(0, 6, f'  {line.strip()}', fill=True)
+        pdf.multi_cell(0, 6, pdf_safe(f'  {line.strip()}'), fill=True)
         pdf.ln(1)
 
     return bytes(pdf.output())
