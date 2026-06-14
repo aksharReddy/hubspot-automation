@@ -47,6 +47,36 @@ def days_since(date_str):
         return 9999
 
 
+def fetch_ticket_company_map(tickets):
+    """Calls HubSpot associations API to link each ticket to its company.
+    Returns dict: company_id (str) -> list of open ticket objects."""
+    if not tickets:
+        return {}
+
+    ticket_by_id = {t['id']: t for t in tickets}
+    company_to_tickets = {}
+
+    ids = list(ticket_by_id.keys())
+    for i in range(0, len(ids), 100):
+        batch = ids[i:i + 100]
+        r = requests.post(
+            f'{BASE}/crm/v3/associations/tickets/companies/batch/read',
+            headers={**HUBSPOT_HEADERS, 'Content-Type': 'application/json'},
+            json={'inputs': [{'id': tid} for tid in batch]}
+        )
+        if r.status_code != 200:
+            continue
+        for result in r.json().get('results', []):
+            ticket_obj = ticket_by_id.get(result['from']['id'])
+            if not ticket_obj:
+                continue
+            for assoc in result.get('to', []):
+                cid = str(assoc['id'])
+                company_to_tickets.setdefault(cid, []).append(ticket_obj)
+
+    return company_to_tickets
+
+
 # ── Fetch data ────────────────────────────────────────────────────────────────
 
 def get_data():
@@ -61,10 +91,11 @@ def get_data():
         'dealname', 'dealstage', 'createdate', 'hs_is_closed_won',
         'hs_closed_won_date', 'amount'
     ])
-    return companies, tickets, deals
+    ticket_company_map = fetch_ticket_company_map(tickets)
+    return companies, tickets, deals, ticket_company_map
 
 
-# ── Build report data ─────────────────────────────────────────────────────────
+# ── Build report data (for HTML/PDF layout) ───────────────────────────────────
 
 def build_report_data(companies, tickets, deals):
     def last_activity(c):
@@ -123,6 +154,102 @@ def build_report_data(companies, tickets, deals):
     }
 
 
+# ── Build rich AI context with cross-object signals ───────────────────────────
+
+def build_ai_context(companies, tickets, deals, ticket_company_map):
+    def last_activity(c):
+        p = c['properties']
+        return min(days_since(p.get('notes_last_updated')),
+                   days_since(p.get('notes_last_contacted')))
+
+    customers  = sorted(
+        [c for c in companies if c['properties'].get('lifecyclestage') == 'customer'],
+        key=last_activity, reverse=True
+    )
+    silent_opps = sorted(
+        [c for c in companies
+         if c['properties'].get('lifecyclestage') == 'opportunity' and last_activity(c) >= 30],
+        key=last_activity, reverse=True
+    )[:20]
+
+    lines = [
+        'You are analyzing live CRM data for NirogGyan, a B2B healthcare SaaS company in India.',
+        'NirogGyan sells diagnostic reporting software to hospitals, labs, and clinics.',
+        '',
+        '--- LIVE CUSTOMERS WITH ENGAGEMENT SIGNALS ---',
+    ]
+
+    for c in customers:
+        p    = c['properties']
+        name = p.get('name', '—')
+        days = last_activity(c)
+        call = (p.get('hs_last_logged_call_date') or '')[:10] or 'never called'
+        cid  = str(c['id'])
+
+        open_tix = [
+            t for t in ticket_company_map.get(cid, [])
+            if t['properties'].get('hs_pipeline_stage') != '4'
+        ]
+        ticket_str = ''
+        if open_tix:
+            parts = []
+            for t in open_tix:
+                tp  = t['properties']
+                pri = tp.get('hs_ticket_priority', '?')
+                age = days_since(tp.get('createdate'))
+                subj = tp.get('subject', '?')
+                parts.append(f'open ticket: "{subj}" [{pri}, {age}d old]')
+            ticket_str = ' | ' + ' + '.join(parts)
+
+        status = 'healthy' if days < 14 else ('at-risk' if days < 30 else 'CRITICAL')
+        lines.append(f'- {name}: {days}d silent | last call: {call} | {status}{ticket_str}')
+
+    lines += ['', '--- SALES OPPORTUNITIES SILENT 30d+ ---']
+    for c in silent_opps:
+        p    = c['properties']
+        name = p.get('name', '—')
+        days = last_activity(c)
+        call = (p.get('hs_last_logged_call_date') or '')[:10] or 'never called'
+        lines.append(f'- {name}: {days}d silent | last call: {call}')
+
+    lines += [
+        '',
+        '--- WHAT I NEED FROM YOU ---',
+        '',
+        '1. CHURN RISK ANALYSIS',
+        'List the top 5 customers most likely to churn. For each, explain WHY using the specific signals — combine silence duration, open ticket subjects and priority, and call history. Do not just restate the numbers; give interpretation.',
+        '',
+        '2. CROSS-SIGNAL ALERTS',
+        'Flag every customer where two or more bad signals coincide (e.g., silent 30d+ AND has an open HIGH ticket AND was never called). Explain why the combination is dangerous.',
+        '',
+        '3. ONE NON-OBVIOUS PATTERN',
+        'What pattern do you see across this data that would not be obvious from just reading the numbers? Something the founder would not notice without looking across all accounts at once.',
+        '',
+        'Use account names throughout. Be specific and direct.',
+    ]
+
+    return '\n'.join(lines)
+
+
+# ── AI analysis via Groq ──────────────────────────────────────────────────────
+
+def get_ai_insight(context):
+    try:
+        r = requests.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            headers={'Authorization': f'Bearer {GROQ_API_KEY}',
+                     'Content-Type': 'application/json'},
+            json={
+                'model': 'llama-3.3-70b-versatile',
+                'messages': [{'role': 'user', 'content': context}],
+                'max_tokens': 800
+            }
+        )
+        return r.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f'AI analysis unavailable: {e}'
+
+
 # ── HTML email ────────────────────────────────────────────────────────────────
 
 def format_html(data, ai_insight):
@@ -136,13 +263,11 @@ def format_html(data, ai_insight):
             'red':    ('fee2e2', 'b91c1c'),
             'yellow': ('fef3c7', '92400e'),
             'green':  ('dcfce7', '166534'),
-            'blue':   ('dbeafe', '1e40af'),
         }
         bg, fg = colors.get(color, ('f1f5f9', '475569'))
         return (f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
                 f'background:#{bg};color:#{fg};font-size:11px;font-weight:700;">{text}</span>')
 
-    # Critical accounts rows
     critical_rows = ''
     for c in cus['critical_list']:
         p    = c['properties']
@@ -157,7 +282,6 @@ def format_html(data, ai_insight):
             f'</tr>'
         )
 
-    # Hot opportunities rows
     la_pip   = pip['last_activity']
     hot_rows = ''
     for c in pip['hot_list']:
@@ -172,7 +296,6 @@ def format_html(data, ai_insight):
             f'</tr>'
         )
 
-    # Ticket rows
     ticket_rows = ''
     for t in tix['list']:
         p   = t['properties']
@@ -187,14 +310,12 @@ def format_html(data, ai_insight):
             f'</tr>'
         )
 
-    # Closed won list
     closed_html = ''
     for d in pip['closed_won_list']:
         closed_html += f'<li style="margin:4px 0;font-size:13px;color:#166534;">&#10003; {d["properties"].get("dealname","—")}</li>'
     if closed_html:
         closed_html = f'<ul style="margin:10px 0 0;padding-left:20px;">{closed_html}</ul>'
 
-    # Pipeline stat pairs
     def stat_row(label, val):
         return (
             f'<div style="display:flex;justify-content:space-between;padding:7px 0;'
@@ -214,13 +335,17 @@ def format_html(data, ai_insight):
         ('Closed won (30d)', pip['closed_won']),
     ]])
 
-    # AI insight
-    ai_html = ''.join(
-        f'<p style="margin:6px 0;font-size:13px;color:#1e40af;line-height:1.6;">{l.strip()}</p>'
-        for l in ai_insight.strip().split('\n') if l.strip()
-    )
+    # Render AI response — bold numbered headings, paragraph text for the rest
+    ai_html = ''
+    for line in ai_insight.strip().split('\n'):
+        s = line.strip()
+        if not s:
+            ai_html += '<br>'
+        elif s[:2] in ('1.', '2.', '3.'):
+            ai_html += f'<p style="margin:14px 0 4px;font-size:13px;font-weight:700;color:#0f2744;">{s}</p>'
+        else:
+            ai_html += f'<p style="margin:3px 0;font-size:13px;color:#1e3a5f;line-height:1.65;">{s}</p>'
 
-    # Conditional blocks
     critical_block = ''
     if cus['critical_list']:
         critical_block = (
@@ -323,8 +448,7 @@ def format_html(data, ai_insight):
       <td style="width:50%;padding-right:10px;vertical-align:top;">{pip_left}</td>
       <td style="width:50%;padding-left:10px;vertical-align:top;">{pip_right}</td>
     </tr></table>
-    {closed_html}
-    {hot_block}
+    {closed_html}{hot_block}
   </td></tr>
 
   <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
@@ -346,8 +470,8 @@ def format_html(data, ai_insight):
   </td></tr>
 
   <tr><td style="background:#fff;padding:8px 32px 24px;">
-    <div style="background:linear-gradient(135deg,#eff6ff,#e0f2fe);border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:18px 20px;">
-      <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">&#9733; AI Recommended Actions for Today</div>
+    <div style="background:#f8faff;border:1px solid #c7d9f5;border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:20px 22px;">
+      <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px;">&#9733; AI Analysis</div>
       {ai_html}
     </div>
   </td></tr>
@@ -436,7 +560,6 @@ def format_pdf(data, ai_insight):
     pdf.cell(0, 7, data['date'], ln=True)
     pdf.ln(2)
 
-    # Summary bar
     pdf.set_fill_color(15, 39, 68)
     pdf.set_font('Helvetica', 'B', 10)
     pdf.set_text_color(255, 255, 255)
@@ -446,7 +569,6 @@ def format_pdf(data, ai_insight):
         pdf.cell(62, 12, f'{val}  {label}', fill=True, align='C')
     pdf.ln(14)
 
-    # Client Health
     pdf.section_title('CLIENT HEALTH')
     pdf.kv_row('Healthy  (< 14 days)', cus['healthy'])
     pdf.kv_row('At Risk  (14–30 days)', cus['at_risk'])
@@ -464,7 +586,6 @@ def format_pdf(data, ai_insight):
             call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
             pdf.tbl_row([(p.get('name', '—'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
 
-    # Sales Pipeline
     pdf.section_title('SALES PIPELINE')
     for label, val in [('Active (last 14d)', pip['active']),
                        ('Follow up (14–30d)', pip['follow_up']),
@@ -486,7 +607,6 @@ def format_pdf(data, ai_insight):
             call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
             pdf.tbl_row([(p.get('name', '—'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
 
-    # Tickets
     pdf.section_title(f'OPEN SUPPORT TICKETS ({tix["open"]})')
     pdf.kv_row('HIGH priority', tix['high'], highlight=(tix['high'] > 0))
     pdf.kv_row('MEDIUM priority', tix['medium'])
@@ -501,43 +621,24 @@ def format_pdf(data, ai_insight):
                          (p.get('hs_ticket_priority', '?'), 35),
                          (f'{age}d', 41)], shade=(i % 2 == 1))
 
-    # AI Insight
-    pdf.section_title('AI RECOMMENDED ACTIONS FOR TODAY')
-    pdf.set_fill_color(239, 246, 255)
-    pdf.set_font('Helvetica', '', 9)
-    pdf.set_text_color(30, 64, 175)
+    pdf.section_title('AI ANALYSIS')
+    pdf.set_fill_color(248, 250, 255)
     for line in ai_insight.strip().split('\n'):
-        if line.strip():
-            pdf.multi_cell(0, 6, f'  {line.strip()}', fill=True)
-            pdf.ln(1)
+        if not line.strip():
+            pdf.ln(2)
+            continue
+        is_heading = line.strip()[:2] in ('1.', '2.', '3.')
+        if is_heading:
+            pdf.ln(3)
+            pdf.set_font('Helvetica', 'B', 9)
+            pdf.set_text_color(15, 39, 68)
+        else:
+            pdf.set_font('Helvetica', '', 9)
+            pdf.set_text_color(30, 58, 138)
+        pdf.multi_cell(0, 6, f'  {line.strip()}', fill=True)
+        pdf.ln(1)
 
     return bytes(pdf.output())
-
-
-# ── Groq AI insight ───────────────────────────────────────────────────────────
-
-def get_ai_insight(summary):
-    try:
-        r = requests.post(
-            'https://api.groq.com/openai/v1/chat/completions',
-            headers={'Authorization': f'Bearer {GROQ_API_KEY}',
-                     'Content-Type': 'application/json'},
-            json={
-                'model': 'llama-3.3-70b-versatile',
-                'messages': [{'role': 'user', 'content':
-                    f'''You are a business analyst for NirogGyan, a healthcare SaaS company.
-Read this daily data and write exactly 3 bullet points of the most important actions the founder should take TODAY.
-Be specific — use actual account names where available. Be direct and concise.
-
-{summary}
-
-Write only 3 bullet points starting with •. No intro, no outro.'''}],
-                'max_tokens': 300
-            }
-        )
-        return r.json()['choices'][0]['message']['content']
-    except Exception as e:
-        return f'• AI insight unavailable: {e}'
 
 
 # ── Send email with HTML body + PDF attachment ────────────────────────────────
@@ -567,24 +668,17 @@ def send_email(subject, html_body, pdf_bytes, date_str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('Fetching HubSpot data...')
-    companies, tickets, deals = get_data()
+    print('Fetching HubSpot data + ticket-company associations...')
+    companies, tickets, deals, ticket_company_map = get_data()
 
     print('Building report data...')
     data = build_report_data(companies, tickets, deals)
 
-    summary = (
-        f"Clients: {data['customers']['total']} total, "
-        f"{data['customers']['healthy']} healthy, "
-        f"{data['customers']['at_risk']} at risk, "
-        f"{data['customers']['critical']} critical. "
-        f"Pipeline: {data['pipeline']['total_opps']} opportunities, "
-        f"{data['pipeline']['silent']} silent 30d+. "
-        f"Tickets: {data['tickets']['open']} open, {data['tickets']['high']} HIGH priority."
-    )
+    print('Building AI context (per-account with cross-object signals)...')
+    ai_context = build_ai_context(companies, tickets, deals, ticket_company_map)
 
-    print('Getting AI insight...')
-    insight = get_ai_insight(summary)
+    print('Getting AI analysis...')
+    insight = get_ai_insight(ai_context)
 
     print('Generating HTML and PDF...')
     html = format_html(data, insight)
