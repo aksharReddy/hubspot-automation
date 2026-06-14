@@ -1,3 +1,4 @@
+import re
 import requests
 import smtplib
 import os
@@ -11,10 +12,19 @@ from fpdf import FPDF, XPos, YPos
 
 def pdf_safe(text):
     return (str(text)
-            .replace('–', '-').replace('—', '-')
-            .replace('‘', "'").replace('’', "'")
-            .replace('“', '"').replace('”', '"')
-            .encode('latin-1', errors='replace').decode('latin-1'))
+            .replace(‘–‘, ‘-’).replace(‘—‘, ‘-’)
+            .replace(‘’’, “’”).replace(‘‘’, “’”)
+            .replace(‘“’, ‘”’).replace(‘”’, ‘”’)
+            .encode(‘latin-1’, errors=’replace’).decode(‘latin-1’))
+
+
+def strip_markdown(text):
+    “””Remove markdown symbols the AI might emit.”””
+    text = re.sub(r’^#{1,6}\s*’, ‘’, text, flags=re.MULTILINE)
+    text = re.sub(r’\*\*(.+?)\*\*’, r’\1’, text)
+    text = re.sub(r’\*(.+?)\*’, r’\1’, text)
+    text = re.sub(r’`(.+?)`’, r’\1’, text)
+    return text
 
 HUBSPOT_TOKEN      = os.environ['HUBSPOT_TOKEN']
 GROQ_API_KEY       = os.environ['GROQ_API_KEY']
@@ -224,16 +234,19 @@ def build_ai_context(companies, tickets, deals, ticket_company_map):
         '',
         '--- WHAT I NEED FROM YOU ---',
         '',
+        'IMPORTANT FORMATTING RULES:',
+        '- Plain text only. No markdown. No **, no ##, no ###, no *, no backticks.',
+        '- Each section max 4 lines. Be punchy and direct.',
+        '- Use account names. No generic statements.',
+        '',
         '1. CHURN RISK ANALYSIS',
-        'List the top 5 customers most likely to churn. For each, explain WHY using the specific signals — combine silence duration, open ticket subjects and priority, and call history. Do not just restate the numbers; give interpretation.',
+        'Top 3 customers most likely to churn. One line each: account name, why they are at risk (combine all signals), what to do.',
         '',
         '2. CROSS-SIGNAL ALERTS',
-        'Flag every customer where two or more bad signals coincide (e.g., silent 30d+ AND has an open HIGH ticket AND was never called). Explain why the combination is dangerous.',
+        'Accounts where multiple bad signals hit at once (silent + open ticket + never called). One line per account. Say what makes it dangerous.',
         '',
-        '3. ONE NON-OBVIOUS PATTERN',
-        'What pattern do you see across this data that would not be obvious from just reading the numbers? Something the founder would not notice without looking across all accounts at once.',
-        '',
-        'Use account names throughout. Be specific and direct.',
+        '3. ONE PATTERN',
+        'One non-obvious thing you see across all accounts. Two sentences max.',
     ]
 
     return '\n'.join(lines)
@@ -250,7 +263,7 @@ def get_ai_insight(context):
             json={
                 'model': 'llama-3.3-70b-versatile',
                 'messages': [{'role': 'user', 'content': context}],
-                'max_tokens': 800
+                'max_tokens': 450
             }
         )
         return r.json()['choices'][0]['message']['content']
@@ -343,16 +356,21 @@ def format_html(data, ai_insight):
         ('Closed won (30d)', pip['closed_won']),
     ]])
 
-    # Render AI response — bold numbered headings, paragraph text for the rest
-    ai_html = ''
-    for line in ai_insight.strip().split('\n'):
+    # Strip markdown then render AI response
+    ai_clean = strip_markdown(ai_insight)
+    ai_html  = ''
+    for line in ai_clean.strip().split('\n'):
         s = line.strip()
         if not s:
-            ai_html += '<br>'
+            ai_html += '<div style="height:8px;"></div>'
         elif s[:2] in ('1.', '2.', '3.'):
-            ai_html += f'<p style="margin:14px 0 4px;font-size:13px;font-weight:700;color:#0f2744;">{s}</p>'
+            ai_html += (f'<p style="margin:14px 0 5px;font-size:12px;font-weight:700;'
+                        f'color:#0f2744;text-transform:uppercase;letter-spacing:0.5px;">{s}</p>')
+        elif s.startswith('-') or s.startswith('•'):
+            ai_html += (f'<p style="margin:3px 0 3px 12px;font-size:13px;color:#1e3a5f;line-height:1.6;">'
+                        f'{s}</p>')
         else:
-            ai_html += f'<p style="margin:3px 0;font-size:13px;color:#1e3a5f;line-height:1.65;">{s}</p>'
+            ai_html += f'<p style="margin:3px 0;font-size:13px;color:#1e3a5f;line-height:1.6;">{s}</p>'
 
     critical_block = ''
     if cus['critical_list']:
@@ -574,7 +592,7 @@ def format_pdf(data, ai_insight):
     for label, val in [('Live Clients', cus['total']),
                        ('Opportunities', pip['total_opps']),
                        ('Open Tickets', tix['open'])]:
-        pdf.cell(62, 12, f'{val}  {label}', fill=True, align='C')
+        pdf.cell(62, 12, pdf_safe(f'{val}  {label}'), fill=True, align='C')
     pdf.ln(14)
 
     pdf.section_title('CLIENT HEALTH')
@@ -582,11 +600,16 @@ def format_pdf(data, ai_insight):
     pdf.kv_row('At Risk  (14-30 days)', cus['at_risk'])
     pdf.kv_row('Critical (30+ days)', cus['critical'], highlight=(cus['critical'] > 0))
 
+    def page_guard(min_mm=45):
+        if pdf.h - pdf.b_margin - pdf.get_y() < min_mm:
+            pdf.add_page()
+
     if cus['critical_list']:
-        pdf.ln(3)
+        pdf.ln(4)
+        page_guard(50)
         pdf.set_font('Helvetica', 'B', 8)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(0, 6, '  ACCOUNTS NEEDING A CALL', ln=True)
+        pdf.cell(0, 6, '  ACCOUNTS NEEDING A CALL', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.tbl_header([('Account', 90), ('Days Silent', 40), ('Last Call', 56)])
         for i, c in enumerate(cus['critical_list']):
             p    = c['properties']
@@ -594,6 +617,7 @@ def format_pdf(data, ai_insight):
             call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
             pdf.tbl_row([(p.get('name', '—'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
 
+    pdf.ln(4)
     pdf.section_title('SALES PIPELINE')
     for label, val in [('Active (last 14d)', pip['active']),
                        ('Follow up (14-30d)', pip['follow_up']),
@@ -604,10 +628,11 @@ def format_pdf(data, ai_insight):
         pdf.kv_row(label, val)
 
     if pip['hot_list']:
-        pdf.ln(3)
+        pdf.ln(4)
+        page_guard(50)
         pdf.set_font('Helvetica', 'B', 8)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(0, 6, '  OPPORTUNITIES TO CHASE TODAY', ln=True)
+        pdf.cell(0, 6, '  OPPORTUNITIES TO CHASE TODAY', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.tbl_header([('Company', 90), ('Days Silent', 40), ('Last Call', 56)])
         for i, c in enumerate(pip['hot_list']):
             p    = c['properties']
@@ -615,12 +640,14 @@ def format_pdf(data, ai_insight):
             call = (p.get('hs_last_logged_call_date') or '')[:10] or 'Never called'
             pdf.tbl_row([(p.get('name', '—'), 90), (f'{days}d', 40), (call, 56)], shade=(i % 2 == 1))
 
+    pdf.ln(4)
     pdf.section_title(f'OPEN SUPPORT TICKETS ({tix["open"]})')
     pdf.kv_row('HIGH priority', tix['high'], highlight=(tix['high'] > 0))
     pdf.kv_row('MEDIUM priority', tix['medium'])
 
     if tix['list']:
-        pdf.ln(3)
+        pdf.ln(4)
+        page_guard(50)
         pdf.tbl_header([('Subject', 110), ('Priority', 35), ('Age', 41)])
         for i, t in enumerate(tix['list']):
             p   = t['properties']
@@ -629,21 +656,28 @@ def format_pdf(data, ai_insight):
                          (p.get('hs_ticket_priority', '?'), 35),
                          (f'{age}d', 41)], shade=(i % 2 == 1))
 
+    pdf.ln(4)
+    page_guard(60)
     pdf.section_title('AI ANALYSIS')
     pdf.set_fill_color(248, 250, 255)
-    for line in ai_insight.strip().split('\n'):
-        if not line.strip():
-            pdf.ln(2)
-            continue
-        is_heading = line.strip()[:2] in ('1.', '2.', '3.')
-        if is_heading:
+    ai_clean = strip_markdown(ai_insight)
+    for line in ai_clean.strip().split('\n'):
+        s = line.strip()
+        if not s:
             pdf.ln(3)
+            continue
+        is_heading = s[:2] in ('1.', '2.', '3.')
+        if is_heading:
+            pdf.ln(4)
             pdf.set_font('Helvetica', 'B', 9)
             pdf.set_text_color(15, 39, 68)
+        elif s.startswith('-') or s.startswith('•'):
+            pdf.set_font('Helvetica', '', 9)
+            pdf.set_text_color(30, 58, 138)
         else:
             pdf.set_font('Helvetica', '', 9)
             pdf.set_text_color(30, 58, 138)
-        pdf.multi_cell(0, 6, pdf_safe(f'  {line.strip()}'), fill=True)
+        pdf.multi_cell(0, 6, pdf_safe(f'  {s}'), fill=True)
         pdf.ln(1)
 
     return bytes(pdf.output())
