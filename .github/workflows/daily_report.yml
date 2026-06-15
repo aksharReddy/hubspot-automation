@@ -2,7 +2,7 @@ name: NirogGyan Daily Pulse
 
 on:
   schedule:
-    - cron: '30 3 * * *'   # 9:00 AM IST every day
+    - cron: '30 4 * * *'   # 10:00 AM IST every day
   workflow_dispatch:         # also lets you trigger it manually from GitHub UI
 
 env:
