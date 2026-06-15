@@ -142,6 +142,10 @@ def get_data():
         'subject', 'hs_ticket_priority', 'hs_pipeline_stage', 'createdate'
     ])
     meetings_today = fetch_meetings_today()
+    if meetings_today:
+        print('MEETING SAMPLE:', meetings_today[0])
+    else:
+        print('NO MEETINGS TODAY')
 
     company_by_id = {c['id']: c for c in companies}
 
