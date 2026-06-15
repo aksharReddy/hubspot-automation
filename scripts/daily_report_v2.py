@@ -110,7 +110,7 @@ def fetch_meetings_today():
                     'highValue': str(end_ms)
                 }]
             }],
-            'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'hs_meeting_end_time'],
+            'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'hs_meeting_end_time', 'hs_meeting_body'],
             'limit': 50
         }
     )
@@ -163,14 +163,11 @@ def get_data():
     meeting_company_map = build_name_map('meetings', 'companies', [m['id'] for m in meetings_today])
 
     # Fetch contact phone numbers for meetings
-    print('Meeting IDs:', [m['id'] for m in meetings_today])
     meeting_phone_map = {}
     if meetings_today:
         mid_list = [m['id'] for m in meetings_today]
         contact_assoc = fetch_associations_batch('meetings', 'contacts', mid_list)
         contact_ids = list({cid for cids in contact_assoc.values() for cid in cids})
-        print('Contact assoc:', contact_assoc)
-        print('Contact IDs:', contact_ids)
         if contact_ids:
             r = requests.post(
                 f'{BASE}/crm/v3/objects/contacts/batch/read',
@@ -184,17 +181,26 @@ def get_data():
                 contact_info = {}
                 for c in r.json().get('results', []):
                     p = c['properties']
-                    phone = p.get('mobilephone') or p.get('phone') or '-'
-                    print('CONTACT:', c['id'], 'phone:', phone, 'props:', p)
-                    contact_info[str(c['id'])] = phone
+                    fname = p.get('firstname') or ''
+                    lname = p.get('lastname') or ''
+                    name  = f'{fname} {lname}'.strip()
+                    phone = p.get('mobilephone') or p.get('phone') or ''
+                    contact_info[str(c['id'])] = {'name': name, 'phone': phone}
                 for mid, cids in contact_assoc.items():
                     for cid in cids:
-                        phone = contact_info.get(str(cid), '-')
-                        if phone != '-':
-                            meeting_phone_map[mid] = phone
-                            break
-                    if mid not in meeting_phone_map and cids:
-                        meeting_phone_map[mid] = contact_info.get(str(cids[0]), '-')
+                        info  = contact_info.get(str(cid), {})
+                        phone = info.get('phone') or info.get('name') or 'Not on record'
+                        meeting_phone_map[mid] = phone
+                        break
+
+    # Fallback: parse phone_number from meeting body if not found via contact
+    for m in meetings_today:
+        mid = m['id']
+        if meeting_phone_map.get(mid, 'Not on record') == 'Not on record':
+            body = m['properties'].get('hs_meeting_body') or ''
+            match = re.search(r'phone_number[:\s]+([+\d][\d\s\-]{6,})', body)
+            if match:
+                meeting_phone_map[mid] = match.group(1).strip()
 
     return companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map
 
