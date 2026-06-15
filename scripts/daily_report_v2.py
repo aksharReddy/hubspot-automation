@@ -210,7 +210,8 @@ def build_report_data(companies, deals, tickets, meetings_today,
     open_deals    = [d for d in deals
                      if d['properties'].get('hs_is_closed') != 'true'
                      and d['properties'].get('hs_is_closed_won') != 'true']
-    silent_deals  = sorted(open_deals, key=deal_silence, reverse=True)[:10]
+    silent_deals  = sorted(open_deals, key=deal_silence, reverse=True)[:5]
+    active_deals  = sorted(open_deals, key=deal_silence)[:5]
 
     open_tickets  = [t for t in tickets if t['properties'].get('hs_pipeline_stage') != '4']
     top_tickets   = sorted(open_tickets,
@@ -236,6 +237,8 @@ def build_report_data(companies, deals, tickets, meetings_today,
         'date':            NOW.strftime('%d %B %Y'),
         'silent_deals':    [(d, deal_silence(d), deal_company_map.get(d['id'], '-'))
                             for d in silent_deals],
+        'active_deals':    [(d, deal_silence(d), deal_company_map.get(d['id'], '-'))
+                            for d in active_deals],
         'open_tickets':    [(t, ticket_company_map.get(t['id'], '-')) for t in top_tickets],
         'meetings':        [(m, meeting_company_map.get(m['id'], '-'), meeting_phone_map.get(m['id'], '-')) for m in meetings_sorted],
         'active_companies': active_cos,
@@ -358,21 +361,41 @@ def format_html(data, ai_insight):
         return (f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
                 f'background:#{bg};color:#{fg};font-size:11px;font-weight:700;">{text}</span>')
 
-    deal_rows = ''
-    for d, silence, company in data['silent_deals']:
-        p      = d['properties']
-        amount = p.get('amount', '')
-        amt    = f'Rs {float(amount):,.0f}' if amount else '-'
-        col    = 'red' if silence >= 30 else 'yellow'
-        deal_rows += (
+    def deal_row(d, silence, company, is_silent):
+        p         = d['properties']
+        name      = p.get('dealname') or '-'
+        close_raw = p.get('closedate') or ''
+        try:
+            close_dt  = datetime.fromisoformat(close_raw.replace('Z', '+00:00'))
+            close_str = close_dt.strftime('%d %b %Y')
+        except Exception:
+            close_str = '-'
+        col = ('red' if silence >= 30 else 'yellow') if is_silent else ('green' if silence <= 7 else 'blue')
+        label = f'{silence}d silent' if is_silent else f'active {silence}d ago'
+        row = (
             f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;font-size:13px;color:#1e293b;font-weight:500;">{p.get("dealname","-")}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#64748b;">{company}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;text-align:center;">{badge(f"{silence}d silent", col)}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#64748b;">{p.get("dealstage","-")}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#64748b;text-align:right;">{amt}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;font-weight:500;">{name}</td>'
+        )
+        if company and company != '-':
+            row += f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{company}</td>'
+        else:
+            row += f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#94a3b8;">-</td>'
+        row += (
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;text-align:center;">{badge(label, col)}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{close_str}</td>'
             f'</tr>'
         )
+        return row
+
+    silent_rows = ''.join(deal_row(d, s, c, True)  for d, s, c in data['silent_deals'])
+    active_rows = ''.join(deal_row(d, s, c, False) for d, s, c in data['active_deals'])
+
+    deal_th = (
+        '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Deal</th>'
+        '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>'
+        '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Activity</th>'
+        '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Close Date</th>'
+    )
 
     ticket_rows = ''
     for t, company in data['open_tickets']:
@@ -489,16 +512,17 @@ def format_html(data, ai_insight):
 
   <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
 
-  <tr><td style="background:#fff;padding:24px 32px;">
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; Top 10 Silent Deals</div>
+  <tr><td style="background:#fff;padding:24px 32px 12px;">
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; 5 Most Silent Deals — Needs Follow-Up</div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #fecaca;border-radius:8px;overflow:hidden;">
-      <tr style="background:#fef2f2;">
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Deal</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Silence</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Stage</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:right;font-weight:600;">Amount</th>
-      </tr>{deal_rows}
+      <tr style="background:#fef2f2;">{deal_th}</tr>{silent_rows}
+    </table>
+  </td></tr>
+
+  <tr><td style="background:#fff;padding:12px 32px 24px;">
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; 5 Most Active Deals — Recently Engaged</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;border-radius:8px;overflow:hidden;">
+      <tr style="background:#f0fdf4;">{deal_th}</tr>{active_rows}
     </table>
   </td></tr>
 
@@ -622,18 +646,35 @@ def format_pdf(data, ai_insight):
         if pdf.h - pdf.b_margin - pdf.get_y() < min_mm:
             pdf.add_page()
 
-    pdf.section_title('TOP 10 SILENT DEALS')
-    pdf.tbl_header([('Deal', 60), ('Company', 50), ('Silent', 25), ('Stage', 35), ('Amount', 16)])
+    def pdf_close(d):
+        raw = d['properties'].get('closedate') or ''
+        try:
+            return datetime.fromisoformat(raw.replace('Z','+00:00')).strftime('%d %b %Y')
+        except Exception:
+            return '-'
+
+    pdf.section_title('5 MOST SILENT DEALS - NEEDS FOLLOW-UP')
+    pdf.tbl_header([('Deal', 70), ('Company', 55), ('Activity', 35), ('Close Date', 26)])
     for i, (d, silence, company) in enumerate(data['silent_deals']):
-        p      = d['properties']
-        amount = p.get('amount', '')
-        amt    = f'{float(amount):,.0f}' if amount else '-'
+        p = d['properties']
         pdf.tbl_row([
-            (p.get('dealname', '-'), 60),
-            (company, 50),
-            (f'{silence}d', 25),
-            (p.get('dealstage', '-'), 35),
-            (amt, 16),
+            (p.get('dealname', '-'), 70),
+            (company if company != '-' else '-', 55),
+            (f'{silence}d silent', 35),
+            (pdf_close(d), 26),
+        ], shade=(i % 2 == 1))
+
+    pdf.ln(4)
+    page_guard()
+    pdf.section_title('5 MOST ACTIVE DEALS - RECENTLY ENGAGED')
+    pdf.tbl_header([('Deal', 70), ('Company', 55), ('Activity', 35), ('Close Date', 26)])
+    for i, (d, silence, company) in enumerate(data['active_deals']):
+        p = d['properties']
+        pdf.tbl_row([
+            (p.get('dealname', '-'), 70),
+            (company if company != '-' else '-', 55),
+            (f'active {silence}d ago', 35),
+            (pdf_close(d), 26),
         ], shade=(i % 2 == 1))
 
     pdf.ln(4)
