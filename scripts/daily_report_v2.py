@@ -265,17 +265,11 @@ def build_ai_context(report_data, ticket_company_map, deal_company_map, meeting_
 
     lines += [
         '',
-        '--- WHAT TO FLAG ---',
-        'Plain text only. No markdown.',
-        '',
-        '1. CROSS-FUNCTIONAL SIGNALS',
-        'Any company where multiple things overlap (e.g. silent deal + open ticket, meeting today but deal stalled). One line per company. If nothing notable, say so briefly.',
-        '',
-        '2. ANYTHING WORTH NOTING',
-        'Any pattern, risk, or opportunity you spot. Keep it practical and specific.',
-        '',
-        '3. ONE THING TO ACT ON TODAY',
-        'The single most actionable item. Two sentences max.',
+        '--- INSTRUCTIONS ---',
+        'Analyze the above CRM data and give insights in exactly 3 sections.',
+        'You decide what the 3 sections are based on what is most useful in the data.',
+        'Each section should have a short title and 2-4 lines of practical insight.',
+        'Use company names. Be specific. Plain text only, no markdown, no ** or ##.',
     ]
 
     return '\n'.join(lines)
