@@ -265,7 +265,7 @@ def build_ai_context(report_data, ticket_company_map, deal_company_map, meeting_
                 'age': days_since(p.get('createdate'))
             })
 
-    for m, company in report_data['meetings']:
+    for m, company, _phone in report_data['meetings']:
         ensure(company)
         if company in report_companies:
             report_companies[company]['meeting'] = True
