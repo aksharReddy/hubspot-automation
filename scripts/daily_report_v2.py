@@ -512,6 +512,15 @@ def format_html(data, ai_insight):
 
   <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
 
+  <tr><td style="background:#fff;padding:16px 32px;">
+    <div style="background:#f8faff;border:1px solid #c7d9f5;border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:18px 22px;">
+      <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">&#9733; AI Analysis</div>
+      {ai_html}
+    </div>
+  </td></tr>
+
+  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+
   <tr><td style="background:#fff;padding:24px 32px 12px;">
     <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; 5 Most Silent Deals — Needs Follow-Up</div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #fecaca;border-radius:8px;overflow:hidden;">
@@ -554,13 +563,6 @@ def format_html(data, ai_insight):
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Age</th>
       </tr>{ticket_rows}
     </table>
-  </td></tr>
-
-  <tr><td style="background:#fff;padding:8px 32px 24px;">
-    <div style="background:#f8faff;border:1px solid #c7d9f5;border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:20px 22px;">
-      <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">&#9733; AI Analysis — Warning Signals</div>
-      {ai_html}
-    </div>
   </td></tr>
 
   <tr><td style="background:#0f2744;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
