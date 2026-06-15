@@ -192,7 +192,7 @@ def get_data():
                     if mid not in meeting_phone_map and cids:
                         meeting_phone_map[mid] = contact_info.get(str(cids[0]), '-')
 
-    return companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map, meeting_phone_map
+    return companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map
 
 
 def build_report_data(companies, deals, tickets, meetings_today,
