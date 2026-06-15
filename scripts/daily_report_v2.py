@@ -268,8 +268,9 @@ def build_ai_context(report_data, ticket_company_map, deal_company_map, meeting_
         '--- INSTRUCTIONS ---',
         'Analyze the above CRM data and give insights in exactly 3 sections.',
         'You decide what the 3 sections are based on what is most useful in the data.',
-        'Each section should have a short title and 2-4 lines of practical insight.',
-        'Use company names. Be specific. Plain text only, no markdown, no ** or ##.',
+        'Each section must start with a title line prefixed by ##, like: ## Recent Engagements',
+        'Then write 2-4 lines of practical insight below the title.',
+        'Use company names. Be specific. No bold (**), no bullet points, just plain text under each ## title.',
     ]
 
     return '\n'.join(lines)
@@ -376,19 +377,19 @@ def format_html(data, ai_insight):
             f'</tr>'
         )
 
-    ai_clean = strip_markdown(ai_insight)
-    ai_html  = ''
-    for line in ai_clean.strip().split('\n'):
+    ai_html = ''
+    for line in ai_insight.strip().split('\n'):
         s = line.strip()
         if not s:
-            ai_html += '<div style="height:8px;"></div>'
-        elif s[:2] in ('1.', '2.', '3.'):
-            ai_html += (f'<p style="margin:14px 0 5px;font-size:12px;font-weight:700;'
-                        f'color:#0f2744;text-transform:uppercase;letter-spacing:0.5px;">{s}</p>')
-        elif s.startswith('-'):
-            ai_html += (f'<p style="margin:3px 0 3px 12px;font-size:13px;color:#1e3a5f;line-height:1.6;">{s}</p>')
+            ai_html += '<div style="height:10px;"></div>'
+        elif s.startswith('##'):
+            title = s.lstrip('#').strip()
+            ai_html += (f'<p style="margin:16px 0 6px;font-size:12px;font-weight:700;'
+                        f'color:#0f2744;text-transform:uppercase;letter-spacing:1px;'
+                        f'border-bottom:1px solid #e2e8f0;padding-bottom:4px;">{title}</p>')
         else:
-            ai_html += f'<p style="margin:3px 0;font-size:13px;color:#1e3a5f;line-height:1.6;">{s}</p>'
+            s = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', s)
+            ai_html += f'<p style="margin:4px 0;font-size:13px;color:#1e3a5f;line-height:1.7;">{s}</p>'
 
     if data['meetings']:
         meetings_section = f'''
@@ -647,20 +648,22 @@ def format_pdf(data, ai_insight):
     page_guard(60)
     pdf.section_title('AI ANALYSIS — WARNING SIGNALS')
     pdf.set_fill_color(248, 250, 255)
-    ai_clean = strip_markdown(ai_insight)
-    for line in ai_clean.strip().split('\n'):
+    for line in ai_insight.strip().split('\n'):
         s = line.strip()
         if not s:
             pdf.ln(3)
             continue
-        if s[:2] in ('1.', '2.', '3.'):
+        if s.startswith('##'):
+            title = s.lstrip('#').strip()
             pdf.ln(4)
             pdf.set_font('Helvetica', 'B', 9)
             pdf.set_text_color(15, 39, 68)
+            pdf.multi_cell(0, 6, pdf_safe(f'  {title.upper()}'), fill=True)
         else:
+            s_clean = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
             pdf.set_font('Helvetica', '', 9)
             pdf.set_text_color(30, 58, 138)
-        pdf.multi_cell(0, 6, pdf_safe(f'  {s}'), fill=True)
+            pdf.multi_cell(0, 6, pdf_safe(f'  {s_clean}'), fill=True)
         pdf.ln(1)
 
     return bytes(pdf.output())
