@@ -110,11 +110,21 @@ def fetch_meetings_today():
                     'highValue': str(end_ms)
                 }]
             }],
-            'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'hs_meeting_outcome'],
+            'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'hs_meeting_end_time'],
             'limit': 50
         }
     )
     return r.json().get('results', []) if r.status_code == 200 else []
+
+
+def parse_meeting_time(ts_val):
+    try:
+        ts = int(str(ts_val).strip())
+        dt  = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        ist = dt + timedelta(hours=5, minutes=30)
+        return ist.strftime('%I:%M %p')
+    except Exception:
+        return '-'
 
 
 def get_data():
@@ -152,11 +162,41 @@ def get_data():
     deal_company_map    = build_name_map('deals',    'companies', [d['id'] for d in deals])
     meeting_company_map = build_name_map('meetings', 'companies', [m['id'] for m in meetings_today])
 
-    return companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map
+    # Fetch contact phone numbers for meetings
+    meeting_phone_map = {}
+    if meetings_today:
+        mid_list = [m['id'] for m in meetings_today]
+        contact_assoc = fetch_associations_batch('meetings', 'contacts', mid_list)
+        contact_ids = list({cid for cids in contact_assoc.values() for cid in cids})
+        if contact_ids:
+            r = requests.post(
+                f'{BASE}/crm/v3/objects/contacts/batch/read',
+                headers={**HUBSPOT_HEADERS, 'Content-Type': 'application/json'},
+                json={
+                    'inputs': [{'id': cid} for cid in contact_ids],
+                    'properties': ['firstname', 'lastname', 'phone', 'mobilephone']
+                }
+            )
+            if r.status_code == 200:
+                contact_info = {}
+                for c in r.json().get('results', []):
+                    p = c['properties']
+                    phone = p.get('mobilephone') or p.get('phone') or '-'
+                    contact_info[str(c['id'])] = phone
+                for mid, cids in contact_assoc.items():
+                    for cid in cids:
+                        phone = contact_info.get(str(cid), '-')
+                        if phone != '-':
+                            meeting_phone_map[mid] = phone
+                            break
+                    if mid not in meeting_phone_map and cids:
+                        meeting_phone_map[mid] = contact_info.get(str(cids[0]), '-')
+
+    return companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map, meeting_phone_map
 
 
 def build_report_data(companies, deals, tickets, meetings_today,
-                      ticket_company_map, deal_company_map, meeting_company_map):
+                      ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map):
     open_deals    = [d for d in deals
                      if d['properties'].get('hs_is_closed') != 'true'
                      and d['properties'].get('hs_is_closed_won') != 'true']
@@ -187,7 +227,7 @@ def build_report_data(companies, deals, tickets, meetings_today,
         'silent_deals':    [(d, deal_silence(d), deal_company_map.get(d['id'], '-'))
                             for d in silent_deals],
         'open_tickets':    [(t, ticket_company_map.get(t['id'], '-')) for t in top_tickets],
-        'meetings':        [(m, meeting_company_map.get(m['id'], '-')) for m in meetings_sorted],
+        'meetings':        [(m, meeting_company_map.get(m['id'], '-'), meeting_phone_map.get(m['id'], '-')) for m in meetings_sorted],
         'active_companies': active_cos,
         'stats': {
             'open_deals_count':   len(open_deals),
@@ -340,24 +380,16 @@ def format_html(data, ai_insight):
         )
 
     meeting_rows = ''
-    for m, company in data['meetings']:
-        p       = m['properties']
-        title   = p.get('hs_meeting_title', 'Meeting')
-        ts      = p.get('hs_meeting_start_time', '')
-        outcome = p.get('hs_meeting_outcome', 'SCHEDULED')
-        try:
-            dt       = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
-            ist      = dt + timedelta(hours=5, minutes=30)
-            time_str = ist.strftime('%I:%M %p IST')
-        except Exception:
-            time_str = '-'
-        col = 'green' if outcome == 'COMPLETED' else 'blue'
+    for m, company, phone in data['meetings']:
+        p        = m['properties']
+        title    = p.get('hs_meeting_title', 'Meeting')
+        time_str = parse_meeting_time(p.get('hs_meeting_start_time'))
         meeting_rows += (
             f'<tr>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:13px;color:#1e293b;">{title}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:12px;color:#64748b;">{company}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:12px;color:#64748b;">{time_str}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;text-align:center;">{badge(outcome, col)}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:12px;color:#64748b;">{time_str} IST</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f0f9ff;font-size:12px;color:#1e293b;font-weight:500;">{phone}</td>'
             f'</tr>'
         )
 
@@ -401,7 +433,7 @@ def format_html(data, ai_insight):
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Title</th>
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Time (IST)</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Status</th>
+        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Phone</th>
       </tr>{meeting_rows}
     </table>
   </td></tr>'''
@@ -614,20 +646,15 @@ def format_pdf(data, ai_insight):
         pdf.ln(4)
         page_guard()
         pdf.section_title(f'MEETINGS TODAY ({stats["meetings_count"]})')
-        pdf.tbl_header([('Title', 85), ('Company', 60), ('Time IST', 41)])
-        for i, (m, company) in enumerate(data['meetings']):
-            p   = m['properties']
-            ts  = p.get('hs_meeting_start_time', '')
-            try:
-                dt       = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
-                ist      = dt + timedelta(hours=5, minutes=30)
-                time_str = ist.strftime('%I:%M %p')
-            except Exception:
-                time_str = '-'
+        pdf.tbl_header([('Title', 72), ('Company', 50), ('Time IST', 30), ('Phone', 34)])
+        for i, (m, company, phone) in enumerate(data['meetings']):
+            p        = m['properties']
+            time_str = parse_meeting_time(p.get('hs_meeting_start_time'))
             pdf.tbl_row([
-                (p.get('hs_meeting_title', 'Meeting'), 85),
-                (company, 60),
-                (time_str, 41),
+                (p.get('hs_meeting_title', 'Meeting'), 72),
+                (company, 50),
+                (time_str, 30),
+                (phone, 34),
             ], shade=(i % 2 == 1))
 
     pdf.ln(4)
@@ -697,11 +724,11 @@ def send_email(subject, html_body, pdf_bytes, date_str):
 
 if __name__ == '__main__':
     print('Fetching HubSpot data...')
-    companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map = get_data()
+    companies, deals, tickets, meetings_today, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map = get_data()
 
     print('Building report data...')
     data = build_report_data(companies, deals, tickets, meetings_today,
-                             ticket_company_map, deal_company_map, meeting_company_map)
+                             ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map)
 
     print('Building AI context...')
     ai_context = build_ai_context(data, ticket_company_map, deal_company_map, meeting_company_map)
