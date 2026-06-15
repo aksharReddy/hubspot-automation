@@ -198,88 +198,87 @@ def build_report_data(companies, deals, tickets, meetings_today,
     }
 
 
-def build_ai_context(companies, deals, tickets, ticket_company_map, deal_company_map):
-    # Company → open tickets
-    company_tickets = {}
-    for t in tickets:
-        if t['properties'].get('hs_pipeline_stage') != '4':
-            cname = ticket_company_map.get(t['id'])
-            if cname:
-                company_tickets.setdefault(cname, []).append(t)
+def build_ai_context(report_data, ticket_company_map, deal_company_map, meeting_company_map):
+    report_companies = {}
 
-    # Company → open deal silences
-    company_deal_silences = {}
-    for d in deals:
-        if d['properties'].get('hs_is_closed') != 'true':
-            cname = deal_company_map.get(d['id'])
-            if cname:
-                company_deal_silences.setdefault(cname, []).append(deal_silence(d))
+    def ensure(name):
+        if name and name != '-':
+            report_companies.setdefault(name, {'deals': [], 'tickets': [], 'meeting': False, 'last_contact': None, 'last_call': None})
 
-    def last_activity(c):
-        p = c['properties']
-        return min(days_since(p.get('notes_last_updated')),
-                   days_since(p.get('notes_last_contacted')))
+    for d, silence, company in report_data['silent_deals']:
+        ensure(company)
+        if company in report_companies:
+            p = d['properties']
+            report_companies[company]['deals'].append({
+                'name': p.get('dealname', '-'),
+                'stage': p.get('dealstage', '-'),
+                'silence': silence
+            })
 
-    customers = [c for c in companies if c['properties'].get('lifecyclestage') == 'customer']
-    opps      = [c for c in companies if c['properties'].get('lifecyclestage') == 'opportunity']
-    focus     = sorted(customers + opps, key=last_activity, reverse=True)[:30]
+    for t, company in report_data['open_tickets']:
+        ensure(company)
+        if company in report_companies:
+            p = t['properties']
+            report_companies[company]['tickets'].append({
+                'subject': p.get('subject', '-'),
+                'priority': p.get('hs_ticket_priority', '?'),
+                'age': days_since(p.get('createdate'))
+            })
+
+    for m, company in report_data['meetings']:
+        ensure(company)
+        if company in report_companies:
+            report_companies[company]['meeting'] = True
+
+    for c in report_data['active_companies']:
+        p    = c['properties']
+        name = p.get('name', '-')
+        ensure(name)
+        if name in report_companies:
+            report_companies[name]['last_contact'] = days_since(
+                p.get('notes_last_contacted') or p.get('notes_last_updated'))
+            report_companies[name]['last_call'] = (p.get('hs_last_logged_call_date') or '')[:10] or 'never'
 
     lines = [
-        'You are analyzing live CRM data for NirogGyan, a B2B healthcare SaaS company in India.',
-        'NirogGyan sells diagnostic reporting software to hospitals, labs, and clinics.',
+        "You are analyzing CRM data for NirogGyan, a B2B healthcare SaaS company in India.",
+        "Below is data ONLY for companies that appear in today's report across deals, tickets, meetings, and active conversations.",
+        "Give practical insights. Plain text only, no markdown, no ** or ##.",
         '',
-        'Below is aggregated company-level signal data.',
-        'Flag companies with multiple warning signals and any abnormalities you spot.',
-        '',
-        '--- COMPANY SIGNALS ---',
+        '--- COMPANY DATA ---',
     ]
 
-    for c in focus:
-        p     = c['properties']
-        name  = p.get('name', '-')
-        days  = last_activity(c)
-        call  = (p.get('hs_last_logged_call_date') or '')[:10] or 'never'
-        stage = p.get('lifecyclestage', '-')
-
-        signals = []
-        if days >= 30:
-            signals.append(f'{days}d no contact (CRITICAL)')
-        elif days >= 14:
-            signals.append(f'{days}d since contact')
-        if call == 'never':
-            signals.append('never called')
-
-        open_tix = company_tickets.get(name, [])
-        if open_tix:
-            high = sum(1 for t in open_tix if t['properties'].get('hs_ticket_priority') == 'HIGH')
-            signals.append(f'{len(open_tix)} open ticket(s)' + (f' incl {high} HIGH' if high else ''))
-
-        deal_silences = company_deal_silences.get(name, [])
-        if deal_silences:
-            worst = max(deal_silences)
-            if worst >= 14:
-                signals.append(f'deal silent {worst}d')
-
-        if signals:
-            lines.append(f'- {name} [{stage}]: {" | ".join(signals)} | last call: {call}')
+    for name, s in report_companies.items():
+        parts = [f'Company: {name}']
+        if s['last_contact'] is not None:
+            parts.append(f'last contact: {s["last_contact"]}d ago')
+        if s['last_call']:
+            parts.append(f'last call: {s["last_call"]}')
+        if s['meeting']:
+            parts.append('has meeting TODAY')
+        if s['deals']:
+            deal_strs = [f'{d["name"]} ({d["stage"]}, {d["silence"]}d silent)' for d in s['deals']]
+            parts.append(f'open deals: {", ".join(deal_strs)}')
+        if s['tickets']:
+            tix_strs = [f'{t["subject"]} [{t["priority"]}, {t["age"]}d old]' for t in s['tickets']]
+            parts.append(f'open tickets: {", ".join(tix_strs)}')
+        lines.append('- ' + ' | '.join(parts))
 
     lines += [
         '',
-        '--- INSTRUCTIONS ---',
-        'Plain text only. No markdown, no **, no ##, no bullet symbols beyond a dash.',
+        '--- WHAT TO FLAG ---',
+        'Plain text only. No markdown.',
         '',
-        '1. MULTI-SIGNAL WARNINGS',
-        'Companies with 2 or more warning signals. One line each: name, signals, recommended action.',
+        '1. CROSS-FUNCTIONAL SIGNALS',
+        'Any company where multiple things overlap (e.g. silent deal + open ticket, meeting today but deal stalled). One line per company. If nothing notable, say so briefly.',
         '',
-        '2. ABNORMALITIES',
-        'Anything unusual or unexpected. Be specific, use account names.',
+        '2. ANYTHING WORTH NOTING',
+        'Any pattern, risk, or opportunity you spot. Keep it practical and specific.',
         '',
-        '3. TOP PRIORITY TODAY',
-        'The single most urgent company and exactly why. Two sentences max.',
+        '3. ONE THING TO ACT ON TODAY',
+        'The single most actionable item. Two sentences max.',
     ]
 
     return '\n'.join(lines)
-
 
 def get_ai_insight(context):
     try:
@@ -708,7 +707,7 @@ if __name__ == '__main__':
                              ticket_company_map, deal_company_map, meeting_company_map)
 
     print('Building AI context...')
-    ai_context = build_ai_context(companies, deals, tickets, ticket_company_map, deal_company_map)
+    ai_context = build_ai_context(data, ticket_company_map, deal_company_map, meeting_company_map)
 
     print('Getting AI analysis...')
     insight = get_ai_insight(ai_context)
