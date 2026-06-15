@@ -1,11 +1,33 @@
 import requests, os, json
 
 token = os.environ["HUBSPOT_TOKEN"]
-headers = {"Authorization": f"Bearer {token}"}
+headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-r = requests.get(
-    "https://api.hubapi.com/crm/v3/objects/contacts/438670378724",
+# Search for contact by phone number
+r = requests.post(
+    "https://api.hubapi.com/crm/v3/objects/contacts/search",
     headers=headers,
-    params={"properties": "phone,mobilephone,hs_whatsapp_phone_number,fax,work_phone,phone_number,hs_phone_number"}
+    json={
+        "filterGroups": [{"filters": [{"propertyName": "phone", "operator": "EQ", "value": "+919014049975"}]}],
+        "properties": ["firstname", "lastname", "phone", "mobilephone", "email"]
+    }
 )
-print(json.dumps(r.json(), indent=2))
+print("By phone:", json.dumps(r.json(), indent=2))
+
+r2 = requests.post(
+    "https://api.hubapi.com/crm/v3/objects/contacts/search",
+    headers=headers,
+    json={
+        "filterGroups": [{"filters": [{"propertyName": "mobilephone", "operator": "EQ", "value": "+919014049975"}]}],
+        "properties": ["firstname", "lastname", "phone", "mobilephone", "email"]
+    }
+)
+print("By mobile:", json.dumps(r2.json(), indent=2))
+
+# Also check all contacts on the meeting
+r3 = requests.post(
+    "https://api.hubapi.com/crm/v3/associations/meetings/contacts/batch/read",
+    headers=headers,
+    json={"inputs": [{"id": "375850892018"}]}
+)
+print("Meeting contacts:", json.dumps(r3.json(), indent=2))
