@@ -163,11 +163,14 @@ def get_data():
     meeting_company_map = build_name_map('meetings', 'companies', [m['id'] for m in meetings_today])
 
     # Fetch contact phone numbers for meetings
+    print('Meeting IDs:', [m['id'] for m in meetings_today])
     meeting_phone_map = {}
     if meetings_today:
         mid_list = [m['id'] for m in meetings_today]
         contact_assoc = fetch_associations_batch('meetings', 'contacts', mid_list)
         contact_ids = list({cid for cids in contact_assoc.values() for cid in cids})
+        print('Contact assoc:', contact_assoc)
+        print('Contact IDs:', contact_ids)
         if contact_ids:
             r = requests.post(
                 f'{BASE}/crm/v3/objects/contacts/batch/read',
@@ -182,6 +185,7 @@ def get_data():
                 for c in r.json().get('results', []):
                     p = c['properties']
                     phone = p.get('mobilephone') or p.get('phone') or '-'
+                    print('CONTACT:', c['id'], 'phone:', phone, 'props:', p)
                     contact_info[str(c['id'])] = phone
                 for mid, cids in contact_assoc.items():
                     for cid in cids:
