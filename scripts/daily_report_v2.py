@@ -118,9 +118,10 @@ def fetch_meetings_today():
 
 
 def parse_meeting_time(ts_val):
+    if not ts_val:
+        return '-'
     try:
-        ts = int(str(ts_val).strip())
-        dt  = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        dt = datetime.fromisoformat(str(ts_val).replace('Z', '+00:00'))
         ist = dt + timedelta(hours=5, minutes=30)
         return ist.strftime('%I:%M %p')
     except Exception:
@@ -142,11 +143,6 @@ def get_data():
         'subject', 'hs_ticket_priority', 'hs_pipeline_stage', 'createdate'
     ])
     meetings_today = fetch_meetings_today()
-    if meetings_today:
-        print('MEETING SAMPLE:', meetings_today[0])
-    else:
-        print('NO MEETINGS TODAY')
-
     company_by_id = {c['id']: c for c in companies}
 
     def build_name_map(from_obj, to_obj, ids):
