@@ -35,10 +35,28 @@ GROQ_API_KEY       = os.environ['GROQ_API_KEY']
 GMAIL_ADDRESS      = os.environ['GMAIL_ADDRESS']
 GMAIL_APP_PASSWORD = os.environ['GMAIL_APP_PASSWORD']
 RECIPIENT_EMAIL    = os.environ['RECIPIENT_EMAIL']
+APOLLO_API_KEY     = os.environ['APOLLO_API_KEY']
 
 HUBSPOT_HEADERS = {'Authorization': f'Bearer {HUBSPOT_TOKEN}'}
 BASE = 'https://api.hubapi.com'
 NOW  = datetime.now(timezone.utc)
+
+APOLLO_BASE    = 'https://api.apollo.io/api/v1'
+APOLLO_HEADERS = {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-cache',
+    'X-Api-Key': APOLLO_API_KEY,
+}
+APOLLO_REPLY_CLASSES = [
+    'willing_to_meet', 'follow_up_question', 'person_referral',
+    'out_of_office', 'not_interested', 'unsubscribe',
+]
+# Statuses that mean the email was actually sent (not just scheduled/drafted)
+SENT_STATUSES = {
+    'delivered', 'not_opened', 'opened', 'clicked',
+    'unsubscribed', 'bounced', 'spam_blocked', 'failed_other',
+}
+OPENED_STATUSES = {'opened', 'clicked'}
 
 
 # ── HubSpot helpers ──────────────────────────────────────────────────────────
@@ -97,6 +115,121 @@ def fetch_ticket_company_map(tickets):
                 company_to_tickets.setdefault(cid, []).append(ticket_obj)
 
     return company_to_tickets
+
+
+# ── Apollo helpers ────────────────────────────────────────────────────────────
+
+def _apollo_sequence_detail(seq_id):
+    r = requests.get(f'{APOLLO_BASE}/emailer_campaigns/{seq_id}', headers=APOLLO_HEADERS)
+    return r.json().get('emailer_campaign', {}) if r.status_code == 200 else {}
+
+
+def _apollo_messages_page(seq_id, page):
+    params = [('emailer_campaign_ids[]', seq_id), ('per_page', 100), ('page', page)]
+    r = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
+                     headers=APOLLO_HEADERS, params=params)
+    if r.status_code != 200:
+        return [], 0
+    data = r.json()
+    return data.get('emailer_messages', []), data.get('pagination', {}).get('total_entries', 0)
+
+
+def get_apollo_data():
+    try:
+        r = requests.post(f'{APOLLO_BASE}/emailer_campaigns/search',
+                          headers=APOLLO_HEADERS,
+                          json={'q_name': 'batch', 'per_page': 50, 'page': 1})
+        if r.status_code != 200:
+            return []
+        seqs = sorted(r.json().get('emailer_campaigns', []),
+                      key=lambda s: s.get('name', '').lower())
+
+        results = []
+        for seq in seqs:
+            sid    = str(seq['id'])
+            detail = _apollo_sequence_detail(sid)
+
+            # Build step_id -> position map from sequence detail
+            steps_meta = detail.get('emailer_steps', [])
+            step_pos   = {
+                str(s['id']): s.get('position', i + 1)
+                for i, s in enumerate(steps_meta)
+            }
+            num_steps = len(steps_meta) or seq.get('num_steps', 0)
+
+            # Fetch all messages for this sequence (paginated)
+            all_msgs, total = _apollo_messages_page(sid, 1)
+            page = 2
+            while len(all_msgs) < total and page <= 20:
+                batch, _ = _apollo_messages_page(sid, page)
+                if not batch:
+                    break
+                all_msgs.extend(batch)
+                page += 1
+
+            # Aggregate per-step stats and collect replied contacts
+            step_stats      = {}   # position -> {sent, opened}
+            replied_contacts = {}  # contact_id -> {name, step}
+
+            for msg in all_msgs:
+                step_id = str(msg.get('emailer_step_id', ''))
+                pos     = step_pos.get(step_id, msg.get('position', '?'))
+
+                if pos not in step_stats:
+                    step_stats[pos] = {'sent': 0, 'opened': 0}
+
+                # Status may be a single string or list
+                raw_status = msg.get('status') or msg.get('emailer_message_stat', '')
+                if isinstance(raw_status, list):
+                    raw_status = raw_status[0] if raw_status else ''
+                status = str(raw_status).lower()
+
+                if status in SENT_STATUSES:
+                    step_stats[pos]['sent'] += 1
+                if status in OPENED_STATUSES:
+                    step_stats[pos]['opened'] += 1
+
+                # Replies
+                reply_classes = msg.get('emailer_message_reply_classes') or []
+                if reply_classes:
+                    c    = msg.get('contact') or {}
+                    cid  = c.get('id') or msg.get('to_email', '')
+                    if cid and cid not in replied_contacts:
+                        name = (
+                            c.get('name') or
+                            f"{c.get('first_name') or ''} {c.get('last_name') or ''}".strip() or
+                            msg.get('to_email', 'Unknown')
+                        )
+                        replied_contacts[cid] = {'name': name, 'step': pos}
+
+            # Sort steps numerically; use position as step number
+            sorted_steps = sorted(
+                step_stats.items(),
+                key=lambda x: x[0] if isinstance(x[0], int) else 999
+            )
+
+            # Current step = last step with at least one sent email
+            current_step = None
+            for pos, st in sorted_steps:
+                if st['sent'] > 0:
+                    current_step = pos
+
+            results.append({
+                'name':             seq.get('name', 'Unknown'),
+                'active':           seq.get('active', False),
+                'num_steps':        num_steps,
+                'current_step':     current_step,
+                'steps':            [{'step': p, 'sent': s['sent'], 'opened': s['opened']}
+                                     for p, s in sorted_steps],
+                'replied':          len(replied_contacts),
+                'replied_contacts': list(replied_contacts.values()),
+            })
+
+        return results
+    except Exception as e:
+        return [{'name': 'Apollo fetch failed', 'error': str(e),
+                 'active': False, 'num_steps': 0, 'current_step': None,
+                 'steps': [], 'replied': 0, 'replied_contacts': []}]
 
 
 # ── Fetch data ────────────────────────────────────────────────────────────────
@@ -277,7 +410,84 @@ def get_ai_insight(context):
 
 # ── HTML email ────────────────────────────────────────────────────────────────
 
-def format_html(data, ai_insight):
+def _apollo_html(apollo_data):
+    if not apollo_data:
+        return ''
+
+    cards = ''
+    for seq in apollo_data:
+        if 'error' in seq:
+            cards += (f'<div style="color:#dc2626;font-size:13px;padding:8px 0;">'
+                      f'Error: {seq["error"]}</div>')
+            continue
+
+        name         = seq['name']
+        active       = seq['active']
+        num_steps    = seq['num_steps']
+        current_step = seq['current_step']
+        steps        = seq['steps']
+        replied      = seq['replied']
+        contacts     = seq['replied_contacts']
+
+        status_badge = (
+            '<span style="display:inline-block;padding:2px 9px;border-radius:10px;'
+            'background:#dcfce7;color:#166534;font-size:11px;font-weight:700;">Active</span>'
+            if active else
+            '<span style="display:inline-block;padding:2px 9px;border-radius:10px;'
+            'background:#f1f5f9;color:#475569;font-size:11px;font-weight:700;">Paused</span>'
+        )
+
+        step_label = (f'Step {current_step} of {num_steps}'
+                      if current_step else f'{num_steps} steps')
+
+        step_rows = ''
+        for s in steps:
+            open_pct = f'{round(s["opened"] / s["sent"] * 100)}%' if s['sent'] else '—'
+            step_rows += (
+                f'<tr>'
+                f'<td style="padding:7px 12px;font-size:13px;color:#334155;">Step {s["step"]}</td>'
+                f'<td style="padding:7px 12px;font-size:13px;color:#0f2744;font-weight:600;text-align:center;">{s["sent"]}</td>'
+                f'<td style="padding:7px 12px;font-size:13px;color:#0f2744;font-weight:600;text-align:center;">{s["opened"]}</td>'
+                f'<td style="padding:7px 12px;font-size:12px;color:#64748b;text-align:center;">{open_pct}</td>'
+                f'</tr>'
+            )
+
+        replied_html = ''
+        if contacts:
+            names = ', '.join(c['name'] for c in contacts)
+            replied_html = (
+                f'<div style="padding:8px 14px;background:#f0fdf4;border-top:1px solid #d1fae5;'
+                f'font-size:12px;color:#166534;">'
+                f'<strong>Replied ({replied}):</strong> {names}</div>'
+            )
+
+        cards += f'''
+<div style="border:1px solid #e2e8f0;border-radius:8px;margin-bottom:14px;overflow:hidden;">
+  <div style="background:#f8fafc;padding:11px 14px;display:flex;justify-content:space-between;align-items:center;">
+    <span style="font-size:13px;font-weight:700;color:#0f2744;">{name}</span>
+    <span>{status_badge}&nbsp;&nbsp;<span style="font-size:12px;color:#64748b;">Currently on <strong style="color:#0f2744;">{step_label}</strong></span></span>
+  </div>
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr style="background:#fff;">
+      <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:left;font-weight:600;">STEP</th>
+      <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">SENT</th>
+      <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">OPENED</th>
+      <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">OPEN %</th>
+    </tr>
+    {step_rows}
+  </table>
+  {replied_html}
+</div>'''
+
+    return f'''
+  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+  <tr><td style="background:#fff;padding:24px 32px;">
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:16px;">&#9632; Email Sequences (Apollo)</div>
+    {cards}
+  </td></tr>'''
+
+
+def format_html(data, ai_insight, apollo_data=None):
     cus = data['customers']
     pip = data['pipeline']
     tix = data['tickets']
@@ -499,6 +709,8 @@ def format_html(data, ai_insight):
     {ticket_table}
   </td></tr>
 
+  {_apollo_html(apollo_data)}
+
   <tr><td style="background:#fff;padding:8px 32px 24px;">
     <div style="background:#f8faff;border:1px solid #c7d9f5;border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:20px 22px;">
       <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px;">&#9733; AI Analysis</div>
@@ -573,7 +785,7 @@ class PulsePDF(FPDF):
         self.ln()
 
 
-def format_pdf(data, ai_insight):
+def format_pdf(data, ai_insight, apollo_data=None):
     cus    = data['customers']
     pip    = data['pipeline']
     tix    = data['tickets']
@@ -660,6 +872,51 @@ def format_pdf(data, ai_insight):
                          (p.get('hs_ticket_priority', '?'), 35),
                          (f'{age}d', 41)], shade=(i % 2 == 1))
 
+    if apollo_data:
+        pdf.ln(4)
+        page_guard(40)
+        pdf.section_title('EMAIL SEQUENCES (APOLLO)')
+        for seq in apollo_data:
+            if 'error' in seq:
+                pdf.set_font('Helvetica', '', 9)
+                pdf.set_text_color(220, 38, 38)
+                pdf.cell(0, 7, pdf_safe(f'  Error: {seq["error"]}'),
+                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                continue
+
+            page_guard(50)
+            status     = 'Active' if seq['active'] else 'Paused'
+            cur_step   = seq['current_step']
+            num_steps  = seq['num_steps']
+            step_label = (f'Step {cur_step} of {num_steps}'
+                          if cur_step else f'{num_steps} steps')
+
+            pdf.ln(3)
+            pdf.set_font('Helvetica', 'B', 10)
+            pdf.set_text_color(15, 39, 68)
+            pdf.cell(0, 7, pdf_safe(f'  {seq["name"]}  [{status}]  --  Currently on {step_label}'),
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            if seq['steps']:
+                pdf.tbl_header([('Step', 40), ('Sent', 45), ('Opened', 45), ('Open %', 56)])
+                for i, s in enumerate(seq['steps']):
+                    open_pct = (f'{round(s["opened"] / s["sent"] * 100)}%'
+                                if s['sent'] else '-')
+                    pdf.tbl_row([
+                        (f'Step {s["step"]}', 40),
+                        (str(s['sent']), 45),
+                        (str(s['opened']), 45),
+                        (open_pct, 56),
+                    ], shade=(i % 2 == 1))
+
+            if seq['replied_contacts']:
+                names = ', '.join(c['name'] for c in seq['replied_contacts'])
+                pdf.ln(2)
+                pdf.set_font('Helvetica', 'B', 9)
+                pdf.set_text_color(22, 101, 52)
+                pdf.cell(0, 6, pdf_safe(f'  Replied ({seq["replied"]}): {names}'),
+                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
     pdf.ln(4)
     page_guard(60)
     pdf.section_title('AI ANALYSIS')
@@ -726,9 +983,12 @@ if __name__ == '__main__':
     print('Getting AI analysis...')
     insight = get_ai_insight(ai_context)
 
+    print('Fetching Apollo sequence analytics...')
+    apollo_data = get_apollo_data()
+
     print('Generating HTML and PDF...')
-    html = format_html(data, insight)
-    pdf  = format_pdf(data, insight)
+    html = format_html(data, insight, apollo_data)
+    pdf  = format_pdf(data, insight, apollo_data)
 
     print('Sending email...')
     send_email(f"NirogGyan Daily Pulse - {data['date']}", html, pdf, data['date'])
