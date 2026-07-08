@@ -380,7 +380,58 @@ def _apollo_count(seq_id, step_id=None, stat=None, reply_classes=None, per_page=
     return d.get('pagination', {}).get('total_entries', 0), d.get('emailer_messages', [])
 
 
+def _apollo_debug():
+    """Print raw Apollo API responses to stdout for debugging."""
+    import json
+    print('\n=== APOLLO DEBUG ===')
+    # 1. Sequence list
+    r = requests.post(f'{APOLLO_BASE}/emailer_campaigns/search',
+                      headers=APOLLO_HEADERS, json={'per_page': 3, 'page': 1})
+    print(f'Sequences status: {r.status_code}')
+    d = r.json()
+    seqs = d.get('emailer_campaigns', [])
+    print(f'Sequences found: {len(seqs)}, total: {d.get("pagination",{}).get("total_entries")}')
+    if seqs:
+        s0 = seqs[0]
+        sid = str(s0['id'])
+        print(f'First seq: name={s0.get("name")} id={sid} active={s0.get("active")} archived={s0.get("archived")}')
+        # 2. Sequence detail
+        r2 = requests.get(f'{APOLLO_BASE}/emailer_campaigns/{sid}', headers=APOLLO_HEADERS)
+        print(f'Detail status: {r2.status_code}')
+        detail = r2.json().get('emailer_campaign', {})
+        steps = detail.get('emailer_steps', [])
+        print(f'Steps in detail: {len(steps)}')
+        if steps:
+            print(f'First step keys: {list(steps[0].keys())}')
+            print(f'First step: {json.dumps(steps[0])}')
+        # 3. Messages without filters
+        r3 = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
+                          headers=APOLLO_HEADERS,
+                          params=[('emailer_campaign_ids[]', sid), ('per_page', 1), ('page', 1)])
+        print(f'Messages (no filter) status: {r3.status_code}')
+        d3 = r3.json()
+        print(f'Messages total_entries: {d3.get("pagination",{}).get("total_entries")}')
+        msgs = d3.get('emailer_messages', [])
+        if msgs:
+            print(f'First message keys: {list(msgs[0].keys())}')
+            print(f'First message: {json.dumps(msgs[0])}')
+        # 4. Messages with stat filter
+        r4 = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
+                          headers=APOLLO_HEADERS,
+                          params=[('emailer_campaign_ids[]', sid), ('emailer_message_stats[]', 'opened'), ('per_page', 1), ('page', 1)])
+        print(f'Messages (opened filter) status: {r4.status_code}, total: {r4.json().get("pagination",{}).get("total_entries")}')
+        # 5. Step filter test
+        if steps:
+            step_id = str(steps[0]['id'])
+            r5 = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
+                              headers=APOLLO_HEADERS,
+                              params=[('emailer_campaign_ids[]', sid), ('emailer_step_ids[]', step_id), ('per_page', 1), ('page', 1)])
+            print(f'Messages (step filter) status: {r5.status_code}, total: {r5.json().get("pagination",{}).get("total_entries")}')
+    print('=== END DEBUG ===\n')
+
+
 def get_apollo_data():
+    _apollo_debug()
     try:
         # Fetch ALL non-archived sequences (no name filter)
         all_seqs, page = [], 1
