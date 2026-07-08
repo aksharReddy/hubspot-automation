@@ -446,15 +446,20 @@ def get_apollo_data():
                 print(f'[APOLLO]   sample msg: {_json.dumps({k: m0.get(k) for k in ["status","campaign_position","replied","reply_class","bounce","to_name","to_email","opened","num_opens"]}, default=str)}')
 
             from collections import Counter
-            status_ctr   = Counter(str(m.get('status') or '').lower() for m in all_msgs)
-            pos_ctr      = Counter(m.get('campaign_position') for m in all_msgs)
-            opened_ctr   = Counter(m.get('campaign_position') for m in all_msgs if m.get('opened'))
-            bounce_ctr   = Counter(m.get('campaign_position') for m in all_msgs if m.get('bounce'))
-            replied_msgs = [m for m in all_msgs if m.get('replied') or m.get('reply_class')]
+            status_ctr    = Counter(str(m.get('status') or '').lower() for m in all_msgs)
+            pos_ctr       = Counter(m.get('campaign_position') for m in all_msgs)
+            bounce_ctr    = Counter(m.get('campaign_position') for m in all_msgs if m.get('bounce'))
+            spam_ctr      = Counter(m.get('campaign_position') for m in all_msgs if m.get('spam_blocked'))
+            delivered_ctr = Counter(m.get('campaign_position') for m in all_msgs
+                                    if str(m.get('status') or '').lower() == 'completed'
+                                    and not m.get('spam_blocked'))
+            replied_msgs  = [m for m in all_msgs if m.get('replied') or m.get('reply_class')]
             print(f'[APOLLO]   statuses: {dict(status_ctr)}')
             print(f'[APOLLO]   positions: {dict(pos_ctr)}')
-            print(f'[APOLLO]   opened field True: {dict(opened_ctr)}')
-            print(f'[APOLLO]   bounce field True: {dict(bounce_ctr)}')
+            print(f'[APOLLO]   bounce=True: {dict(bounce_ctr)}')
+            print(f'[APOLLO]   spam_blocked=True: {dict(spam_ctr)}')
+            print(f'[APOLLO]   delivered (completed & !spam): {dict(delivered_ctr)}')
+            print(f'[APOLLO]   detail unique_delivered={detail.get("unique_delivered")} unique_bounced={detail.get("unique_bounced")} unique_opened={detail.get("unique_opened")} unique_replied={detail.get("unique_replied")} unique_spam_blocked={detail.get("unique_spam_blocked")}')
             print(f'[APOLLO]   replied msgs: {len(replied_msgs)}')
             for rm in replied_msgs:
                 print(f'[APOLLO]     replier: {rm.get("to_name")} pos={rm.get("campaign_position")} reply_class={rm.get("reply_class")}')
@@ -481,9 +486,11 @@ def get_apollo_data():
                     step_stats[pos] = {'sent': 0, 'opened': 0, 'bounced': 0,
                                        'replied': 0, 'repliers': set()}
 
-                if status == 'completed':
+                # delivered = completed AND not spam-blocked (matches Apollo UI)
+                if status == 'completed' and not msg.get('spam_blocked'):
                     step_stats[pos]['sent'] += 1
-                if status == 'failed' or msg.get('bounce'):
+                # bounced = hard bounce field only (matches Apollo UI; 'failed' includes spam, not shown as bounce)
+                if msg.get('bounce'):
                     step_stats[pos]['bounced'] += 1
                 if msg.get('replied') or msg.get('reply_class'):
                     name = msg.get('to_name') or msg.get('to_email', 'Unknown')
