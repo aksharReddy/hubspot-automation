@@ -419,12 +419,16 @@ def get_apollo_data():
                 for i, s in enumerate(steps_meta)
             }
 
-            # Fetch all messages and parse status directly
-            # status field: 'scheduled'|'drafted'|'not_opened'|'opened'|'clicked'|
-            #               'bounced'|'unsubscribed'|'spam_blocked'|'failed_other'
-            # campaign_position = step number (1-based)
-            # replied = bool, reply_class = str, to_name = contact name
-            for msg in _fetch_all_messages(sid):
+            all_msgs = _fetch_all_messages(sid)
+            # DEBUG: print status breakdown for this sequence
+            from collections import Counter
+            status_counts = Counter(str(m.get('status') or '').lower() for m in all_msgs)
+            reply_count   = sum(1 for m in all_msgs if m.get('replied') or m.get('reply_class'))
+            bounce_count  = sum(1 for m in all_msgs if m.get('bounce') or str(m.get('status') or '').lower() == 'bounced')
+            pos_counts    = Counter(m.get('campaign_position') for m in all_msgs)
+            print(f'[APOLLO] {seq.get("name")} | total_msgs={len(all_msgs)} | statuses={dict(status_counts)} | positions={dict(pos_counts)} | replied={reply_count} | bounce={bounce_count}')
+
+            for msg in all_msgs:
                 pos    = msg.get('campaign_position')
                 status = str(msg.get('status') or '').lower()
 
@@ -433,7 +437,6 @@ def get_apollo_data():
                                        'replied': 0, 'repliers': set()}
 
                 is_replied = bool(msg.get('replied') or msg.get('reply_class'))
-                # delivered = actually reached inbox (excludes bounced/spam/failed)
                 if status in ('delivered', 'not_opened', 'opened', 'clicked', 'unsubscribed') or is_replied:
                     step_stats[pos]['sent'] += 1
                 if status in ('opened', 'clicked') or is_replied:
