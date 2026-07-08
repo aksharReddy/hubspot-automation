@@ -432,13 +432,14 @@ def get_apollo_data():
                     step_stats[pos] = {'sent': 0, 'opened': 0, 'bounced': 0,
                                        'replied': 0, 'repliers': set()}
 
+                is_replied = bool(msg.get('replied') or msg.get('reply_class'))
                 if status and status not in ('scheduled', 'drafted'):
                     step_stats[pos]['sent'] += 1
-                if status in ('opened', 'clicked'):
+                if status in ('opened', 'clicked') or is_replied:
                     step_stats[pos]['opened'] += 1
                 if status == 'bounced' or msg.get('bounce'):
                     step_stats[pos]['bounced'] += 1
-                if msg.get('replied') or msg.get('reply_class'):
+                if is_replied:
                     name = msg.get('to_name') or msg.get('to_email', 'Unknown')
                     step_stats[pos]['repliers'].add(name)
                     step_stats[pos]['replied'] += 1
