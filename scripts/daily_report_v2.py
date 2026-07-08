@@ -385,21 +385,16 @@ def _fetch_messages(seq_id, stat_filter=None):
 
 
 def get_apollo_data():
-    import json as _json
     try:
-        # ── Step 1: fetch all non-archived sequences ───────────────────────────
         all_seqs, page = [], 1
         while True:
             r = requests.post(f'{APOLLO_BASE}/emailer_campaigns/search',
                               headers=APOLLO_HEADERS,
                               json={'per_page': 50, 'page': page})
-            print(f'[APOLLO] campaigns/search page={page} status={r.status_code}')
             if r.status_code != 200:
-                print(f'[APOLLO] campaigns/search error body: {r.text[:500]}')
                 break
             d     = r.json()
             batch = d.get('emailer_campaigns', [])
-            print(f'[APOLLO] campaigns/search page={page} got {len(batch)} campaigns')
             if not batch:
                 break
             all_seqs.extend(s for s in batch if not s.get('archived', False))
@@ -407,69 +402,21 @@ def get_apollo_data():
                 break
             page += 1
 
-        print(f'[APOLLO] Total non-archived sequences: {len(all_seqs)}')
-        for s in all_seqs:
-            print(f'[APOLLO]   seq name={s.get("name")!r} id={s.get("id")} archived={s.get("archived")}')
-
         seqs    = sorted(all_seqs, key=lambda s: s.get('name', '').lower())
         results = []
 
         for seq in seqs:
-            sid    = str(seq['id'])
-            sname  = seq.get('name', 'Unknown')
-
-            # ── Step 2: fetch sequence detail and dump emailer_steps ───────────
+            sid        = str(seq['id'])
             detail     = _apollo_seq_detail(sid)
             steps_meta = detail.get('emailer_steps', [])
             num_steps  = len(steps_meta) or seq.get('num_steps', 0)
 
-            print(f'\n[APOLLO] === {sname} (id={sid}) ===')
-            print(f'[APOLLO]   num_steps_meta={len(steps_meta)}  seq.num_steps={seq.get("num_steps")}')
-            for i, sm in enumerate(steps_meta):
-                print(f'[APOLLO]   step_meta[{i}]: position={sm.get("position")} type={sm.get("type")} keys={list(sm.keys())}')
-            # Print top-level keys of detail to see if stats are embedded
-            print(f'[APOLLO]   detail keys: {list(detail.keys())}')
-            # Check if any stat-like keys exist at campaign or step level
-            for k in ['num_sent_email_events', 'num_opened_email_events', 'num_replied_email_events',
-                      'statistics', 'stats', 'emailer_campaign_stats']:
-                if k in detail:
-                    print(f'[APOLLO]   detail[{k!r}] = {detail[k]}')
+            # Campaign-level stats from Apollo (exactly what the UI shows)
+            uniq_delivered = detail.get('unique_delivered') or 0
+            uniq_opened    = detail.get('unique_opened') or 0
+            uniq_bounced   = detail.get('unique_bounced') or 0
 
-            # ── Step 3: fetch all messages for this sequence ───────────────────
-            all_msgs = _fetch_messages(sid)
-            print(f'[APOLLO]   total messages fetched: {len(all_msgs)}')
-
-            if all_msgs:
-                # Print first message keys to understand structure
-                m0 = all_msgs[0]
-                print(f'[APOLLO]   sample msg keys: {list(m0.keys())}')
-                print(f'[APOLLO]   sample msg: {_json.dumps({k: m0.get(k) for k in ["status","campaign_position","replied","reply_class","bounce","to_name","to_email","opened","num_opens"]}, default=str)}')
-
-            from collections import Counter
-            status_ctr    = Counter(str(m.get('status') or '').lower() for m in all_msgs)
-            pos_ctr       = Counter(m.get('campaign_position') for m in all_msgs)
-            bounce_ctr    = Counter(m.get('campaign_position') for m in all_msgs if m.get('bounce'))
-            spam_ctr      = Counter(m.get('campaign_position') for m in all_msgs if m.get('spam_blocked'))
-            delivered_ctr = Counter(m.get('campaign_position') for m in all_msgs
-                                    if str(m.get('status') or '').lower() == 'completed'
-                                    and not m.get('spam_blocked'))
-            replied_msgs  = [m for m in all_msgs if m.get('replied') or m.get('reply_class')]
-            print(f'[APOLLO]   statuses: {dict(status_ctr)}')
-            print(f'[APOLLO]   positions: {dict(pos_ctr)}')
-            print(f'[APOLLO]   bounce=True: {dict(bounce_ctr)}')
-            print(f'[APOLLO]   spam_blocked=True: {dict(spam_ctr)}')
-            print(f'[APOLLO]   delivered (completed & !spam): {dict(delivered_ctr)}')
-            print(f'[APOLLO]   detail unique_delivered={detail.get("unique_delivered")} unique_bounced={detail.get("unique_bounced")} unique_opened={detail.get("unique_opened")} unique_replied={detail.get("unique_replied")} unique_spam_blocked={detail.get("unique_spam_blocked")}')
-            print(f'[APOLLO]   replied msgs: {len(replied_msgs)}')
-            for rm in replied_msgs:
-                print(f'[APOLLO]     replier: {rm.get("to_name")} pos={rm.get("campaign_position")} reply_class={rm.get("reply_class")}')
-
-            # Opened via stat filter
-            opened_filter_msgs = _fetch_messages(sid, stat_filter='opened')
-            opos_ctr = Counter(m.get('campaign_position') for m in opened_filter_msgs)
-            print(f'[APOLLO]   opened-filter msgs: {len(opened_filter_msgs)} positions: {dict(opos_ctr)}')
-
-            # ── Step 4: build step_stats ──────────────────────────────────────
+            # Pre-populate all steps with zero counts
             step_stats = {
                 sm.get('position', i + 1): {
                     'sent': 0, 'opened': 0, 'bounced': 0,
@@ -478,35 +425,41 @@ def get_apollo_data():
                 for i, sm in enumerate(steps_meta)
             }
 
+            all_msgs = _fetch_messages(sid)
+
+            # Count completed messages per step (for distribution ratio)
+            msg_compl_per_step = {}
             for msg in all_msgs:
                 pos    = msg.get('campaign_position')
                 status = str(msg.get('status') or '').lower()
-
                 if pos not in step_stats:
                     step_stats[pos] = {'sent': 0, 'opened': 0, 'bounced': 0,
                                        'replied': 0, 'repliers': set()}
-
-                # delivered = completed AND not spam-blocked (matches Apollo UI)
                 if status == 'completed' and not msg.get('spam_blocked'):
-                    step_stats[pos]['sent'] += 1
-                # bounced = hard bounce field only (matches Apollo UI; 'failed' includes spam, not shown as bounce)
-                if msg.get('bounce'):
-                    step_stats[pos]['bounced'] += 1
+                    msg_compl_per_step[pos] = msg_compl_per_step.get(pos, 0) + 1
                 if msg.get('replied') or msg.get('reply_class'):
                     name = msg.get('to_name') or msg.get('to_email', 'Unknown')
                     step_stats[pos]['repliers'].add(name)
                     step_stats[pos]['replied'] += 1
                     step_stats[pos]['opened'] += 1
 
-            for msg in opened_filter_msgs:
-                pos = msg.get('campaign_position')
-                if pos in step_stats:
-                    if not (msg.get('replied') or msg.get('reply_class')):
-                        step_stats[pos]['opened'] += 1
+            # Distribute campaign-level unique_delivered/opened/bounced across steps.
+            # If only one step has completions, it gets the full campaign total (exact match to UI).
+            # If multiple steps are active, distribute proportionally by message count.
+            total_compl = sum(msg_compl_per_step.values())
+            for pos, cnt in msg_compl_per_step.items():
+                ratio = cnt / total_compl if total_compl > 0 else 0
+                step_stats[pos]['sent']    = round(uniq_delivered * ratio)
+                step_stats[pos]['bounced'] = round(uniq_bounced   * ratio)
 
-            print(f'[APOLLO]   step_stats keys: {list(step_stats.keys())}')
-            for p, st in sorted(step_stats.items(), key=lambda x: x[0] if x[0] else 999):
-                print(f'[APOLLO]   step {p}: sent={st["sent"]} opened={st["opened"]} replied={st["replied"]} bounced={st["bounced"]}')
+            # Opened: start from unique_opened distributed by step, then adjust for replied
+            for pos, cnt in msg_compl_per_step.items():
+                ratio = cnt / total_compl if total_compl > 0 else 0
+                step_stats[pos]['opened'] = round(uniq_opened * ratio)
+            # Replies imply opened — ensure opened >= replied per step
+            for pos, st in step_stats.items():
+                if st['replied'] > st['opened']:
+                    step_stats[pos]['opened'] = st['replied']
 
             sorted_steps = sorted(
                 step_stats.items(),
@@ -518,7 +471,7 @@ def get_apollo_data():
                     current_step = pos
 
             results.append({
-                'name':          sname,
+                'name':          seq.get('name', 'Unknown'),
                 'active':        seq.get('active', False),
                 'num_steps':     num_steps,
                 'current_step':  current_step,
@@ -535,9 +488,6 @@ def get_apollo_data():
 
         return results
     except Exception as e:
-        import traceback
-        print(f'[APOLLO] EXCEPTION: {e}')
-        traceback.print_exc()
         return [{'name': 'Apollo fetch failed', 'error': str(e),
                  'active': False, 'num_steps': 0, 'current_step': None,
                  'steps': [], 'total_replied': 0}]
