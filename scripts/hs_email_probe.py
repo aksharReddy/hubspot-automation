@@ -1,53 +1,54 @@
 import requests, os, json
+from datetime import datetime, timezone, timedelta
 
 TOKEN = os.environ['HUBSPOT_TOKEN']
 HEADERS = {'Authorization': f'Bearer {TOKEN}'}
 BASE = 'https://api.hubapi.com'
 
-# 1. Fetch recent emails
-print("=== Recent emails ===")
-r = requests.get(f'{BASE}/crm/v3/objects/emails', headers=HEADERS, params={
-    'limit': 5,
-    'properties': 'hs_email_subject,hs_email_direction,hs_timestamp,hs_email_from_email,hs_email_to_email,hs_email_status,hs_email_body',
-    'sort': '-hs_timestamp'
-})
+# 1. Legacy engagements API - uses basic contacts scope, no sales-email-read needed
+print("=== Legacy Engagements API ===")
+r = requests.get(f'{BASE}/engagements/v1/engagements/paged', headers=HEADERS,
+                 params={'limit': 20, 'offset': 0})
 print(f"Status: {r.status_code}")
-data = r.json()
-emails = data.get('results', [])
-print(f"Count: {len(emails)}")
-for e in emails:
-    p = e['properties']
-    print(f"\n  id={e['id']}")
-    print(f"  subject={p.get('hs_email_subject')}")
-    print(f"  direction={p.get('hs_email_direction')}")
-    print(f"  timestamp={p.get('hs_timestamp')}")
-    print(f"  from={p.get('hs_email_from_email')}")
-    print(f"  to={p.get('hs_email_to_email')}")
-    print(f"  status={p.get('hs_email_status')}")
-    body = (p.get('hs_email_body') or '')[:200]
-    print(f"  body_preview={body!r}")
+if r.status_code == 200:
+    data = r.json()
+    results = data.get('results', [])
+    all_types = set(e.get('engagement', {}).get('type') for e in results)
+    print(f"Total in page: {len(results)}  Types seen: {all_types}")
+    emails = [e for e in results if e.get('engagement', {}).get('type') in ('EMAIL', 'INCOMING_EMAIL')]
+    print(f"Email engagements: {len(emails)}")
+    for e in emails[:3]:
+        eng  = e.get('engagement', {})
+        meta = e.get('metadata', {})
+        assoc = e.get('associations', {})
+        print(f"\n  id={eng.get('id')} type={eng.get('type')} ts={eng.get('timestamp')}")
+        print(f"  subject={meta.get('subject')}")
+        print(f"  from={meta.get('from')}")
+        print(f"  to={meta.get('to')}")
+        print(f"  contactIds={assoc.get('contactIds')}  companyIds={assoc.get('companyIds')}")
+        body = (meta.get('text') or meta.get('html') or '')[:300]
+        print(f"  body={body!r}")
+else:
+    print(r.text[:500])
 
-# 2. Try associations on first email
-if emails:
-    eid = emails[0]['id']
-    print(f"\n=== Associations for email {eid} ===")
-    for obj in ['contacts', 'companies']:
-        r2 = requests.get(f'{BASE}/crm/v3/objects/emails/{eid}/associations/{obj}', headers=HEADERS)
-        print(f"  {obj}: status={r2.status_code} data={r2.json()}")
+# 2. CRM v3 emails (needs sales-email-read)
+print("\n=== CRM v3 /emails ===")
+r2 = requests.get(f'{BASE}/crm/v3/objects/emails', headers=HEADERS,
+                  params={'limit': 3, 'properties': 'hs_email_subject,hs_timestamp'})
+print(f"Status: {r2.status_code}  body: {r2.text[:300]}")
 
-# 3. Try search with direction filter
-print("\n=== Search OUTBOUND emails last 7 days ===")
-from datetime import datetime, timezone, timedelta
-cutoff = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
-r3 = requests.post(f'{BASE}/crm/v3/objects/emails/search', headers={**HEADERS, 'Content-Type': 'application/json'},
-    json={
-        'filterGroups': [{'filters': [
-            {'propertyName': 'hs_email_direction', 'operator': 'EQ', 'value': 'EMAIL'},
-            {'propertyName': 'hs_timestamp', 'operator': 'GTE', 'value': str(cutoff)}
-        ]}],
-        'properties': ['hs_email_subject', 'hs_email_direction', 'hs_timestamp', 'hs_email_from_email', 'hs_email_to_email'],
-        'limit': 5,
-        'sorts': [{'propertyName': 'hs_timestamp', 'direction': 'DESCENDING'}]
-    })
-print(f"Status: {r3.status_code}")
-print(json.dumps(r3.json(), indent=2)[:1000])
+# 3. Activities via timeline
+print("\n=== CRM v3 /objects/0-14 (email activity) ===")
+r3 = requests.get(f'{BASE}/crm/v3/objects/0-14', headers=HEADERS, params={'limit': 3})
+print(f"Status: {r3.status_code}  body: {r3.text[:300]}")
+
+# 4. Check token scopes
+print("\n=== Token scopes ===")
+r4 = requests.get(f'{BASE}/oauth/v1/access-tokens/{TOKEN}')
+print(f"Status: {r4.status_code}")
+if r4.status_code == 200:
+    info = r4.json()
+    print(f"Scopes: {info.get('scopes')}")
+else:
+    r5 = requests.get(f'https://api.hubapi.com/crm/v3/objects/contacts?limit=1', headers=HEADERS)
+    print(f"contacts check: {r5.status_code}")
