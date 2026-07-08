@@ -363,77 +363,28 @@ def _apollo_seq_detail(seq_id):
     return r.json().get('emailer_campaign', {}) if r.status_code == 200 else {}
 
 
-def _apollo_count(seq_id, step_id=None, stat=None, reply_classes=None, per_page=1):
-    """Query emailer_messages/search and return (total_entries, messages)."""
-    params = [('emailer_campaign_ids[]', seq_id), ('per_page', per_page), ('page', 1)]
-    if step_id:
-        params.append(('emailer_step_ids[]', step_id))
-    if stat:
-        params.append(('emailer_message_stats[]', stat))
-    for rc in (reply_classes or []):
-        params.append(('emailer_message_reply_classes[]', rc))
-    r = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
-                     headers=APOLLO_HEADERS, params=params)
-    if r.status_code != 200:
-        return 0, []
-    d = r.json()
-    return d.get('pagination', {}).get('total_entries', 0), d.get('emailer_messages', [])
-
-
-def _apollo_debug():
-    """Print raw Apollo API responses to stdout for debugging."""
-    import json
-    print('\n=== APOLLO DEBUG ===')
-    # 1. Sequence list
-    r = requests.post(f'{APOLLO_BASE}/emailer_campaigns/search',
-                      headers=APOLLO_HEADERS, json={'per_page': 3, 'page': 1})
-    print(f'Sequences status: {r.status_code}')
-    d = r.json()
-    seqs = d.get('emailer_campaigns', [])
-    print(f'Sequences found: {len(seqs)}, total: {d.get("pagination",{}).get("total_entries")}')
-    if seqs:
-        s0 = seqs[0]
-        sid = str(s0['id'])
-        print(f'First seq: name={s0.get("name")} id={sid} active={s0.get("active")} archived={s0.get("archived")}')
-        # 2. Sequence detail
-        r2 = requests.get(f'{APOLLO_BASE}/emailer_campaigns/{sid}', headers=APOLLO_HEADERS)
-        print(f'Detail status: {r2.status_code}')
-        detail = r2.json().get('emailer_campaign', {})
-        steps = detail.get('emailer_steps', [])
-        print(f'Steps in detail: {len(steps)}')
-        if steps:
-            print(f'First step keys: {list(steps[0].keys())}')
-            print(f'First step: {json.dumps(steps[0])}')
-        # 3. Messages without filters
-        r3 = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
-                          headers=APOLLO_HEADERS,
-                          params=[('emailer_campaign_ids[]', sid), ('per_page', 1), ('page', 1)])
-        print(f'Messages (no filter) status: {r3.status_code}')
-        d3 = r3.json()
-        print(f'Messages total_entries: {d3.get("pagination",{}).get("total_entries")}')
-        msgs = d3.get('emailer_messages', [])
-        if msgs:
-            print(f'First message keys: {list(msgs[0].keys())}')
-            print(f'First message: {json.dumps(msgs[0])}')
-        # 4. Messages with stat filter
-        r4 = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
-                          headers=APOLLO_HEADERS,
-                          params=[('emailer_campaign_ids[]', sid), ('emailer_message_stats[]', 'opened'), ('per_page', 1), ('page', 1)])
-        print(f'Messages (opened filter) status: {r4.status_code}, total: {r4.json().get("pagination",{}).get("total_entries")}')
-        # 5. Step filter test
-        if steps:
-            step_id = str(steps[0]['id'])
-            r5 = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
-                              headers=APOLLO_HEADERS,
-                              params=[('emailer_campaign_ids[]', sid), ('emailer_step_ids[]', step_id), ('per_page', 1), ('page', 1)])
-            print(f'Messages (step filter) status: {r5.status_code}, total: {r5.json().get("pagination",{}).get("total_entries")}')
-    print('=== END DEBUG ===\n')
+def _fetch_all_messages(seq_id):
+    """Paginate through all messages for a sequence."""
+    msgs, page = [], 1
+    while page <= 50:
+        params = [('emailer_campaign_ids[]', seq_id), ('per_page', 100), ('page', page)]
+        r = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
+                         headers=APOLLO_HEADERS, params=params)
+        if r.status_code != 200:
+            break
+        batch = r.json().get('emailer_messages', [])
+        if not batch:
+            break
+        msgs.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return msgs
 
 
 def get_apollo_data():
-    _apollo_debug()
     try:
-        # Fetch ALL non-archived sequences (no name filter)
+        # Fetch ALL non-archived sequences
         all_seqs, page = [], 1
         while True:
             r = requests.post(f'{APOLLO_BASE}/emailer_campaigns/search',
@@ -441,17 +392,16 @@ def get_apollo_data():
                               json={'per_page': 50, 'page': page})
             if r.status_code != 200:
                 break
-            d = r.json()
+            d     = r.json()
             batch = d.get('emailer_campaigns', [])
             if not batch:
                 break
             all_seqs.extend(s for s in batch if not s.get('archived', False))
-            total = d.get('pagination', {}).get('total_entries', 0)
-            if len(all_seqs) >= total:
+            if len(batch) < 50:
                 break
             page += 1
 
-        seqs = sorted(all_seqs, key=lambda s: s.get('name', '').lower())
+        seqs    = sorted(all_seqs, key=lambda s: s.get('name', '').lower())
         results = []
 
         for seq in seqs:
@@ -460,56 +410,62 @@ def get_apollo_data():
             steps_meta = detail.get('emailer_steps', [])
             num_steps  = len(steps_meta) or seq.get('num_steps', 0)
 
-            steps        = []
+            # Pre-populate all steps with zero counts so every step shows up
+            step_stats = {
+                s.get('position', i + 1): {
+                    'sent': 0, 'opened': 0, 'bounced': 0,
+                    'replied': 0, 'repliers': set(),
+                }
+                for i, s in enumerate(steps_meta)
+            }
+
+            # Fetch all messages and parse status directly
+            # status field: 'scheduled'|'drafted'|'not_opened'|'opened'|'clicked'|
+            #               'bounced'|'unsubscribed'|'spam_blocked'|'failed_other'
+            # campaign_position = step number (1-based)
+            # replied = bool, reply_class = str, to_name = contact name
+            for msg in _fetch_all_messages(sid):
+                pos    = msg.get('campaign_position')
+                status = str(msg.get('status') or '').lower()
+
+                if pos not in step_stats:
+                    step_stats[pos] = {'sent': 0, 'opened': 0, 'bounced': 0,
+                                       'replied': 0, 'repliers': set()}
+
+                if status and status not in ('scheduled', 'drafted'):
+                    step_stats[pos]['sent'] += 1
+                if status in ('opened', 'clicked'):
+                    step_stats[pos]['opened'] += 1
+                if status == 'bounced' or msg.get('bounce'):
+                    step_stats[pos]['bounced'] += 1
+                if msg.get('replied') or msg.get('reply_class'):
+                    name = msg.get('to_name') or msg.get('to_email', 'Unknown')
+                    step_stats[pos]['repliers'].add(name)
+                    step_stats[pos]['replied'] += 1
+
+            sorted_steps = sorted(
+                step_stats.items(),
+                key=lambda x: x[0] if isinstance(x[0], (int, float)) else 999
+            )
             current_step = None
-
-            for i, step_meta in enumerate(steps_meta):
-                step_id  = str(step_meta['id'])
-                step_num = step_meta.get('position', i + 1)
-
-                # Use filter-count approach — reliable, no status parsing needed
-                total, _         = _apollo_count(sid, step_id=step_id)
-                scheduled, _     = _apollo_count(sid, step_id=step_id, stat='scheduled')
-                drafted, _       = _apollo_count(sid, step_id=step_id, stat='drafted')
-                opened, _        = _apollo_count(sid, step_id=step_id, stat='opened')
-                bounced, _       = _apollo_count(sid, step_id=step_id, stat='bounced')
-                replied, rep_msgs = _apollo_count(
-                    sid, step_id=step_id,
-                    reply_classes=APOLLO_REPLY_CLASSES, per_page=25
-                )
-
-                sent = max(0, total - scheduled - drafted)
-                if sent > 0:
-                    current_step = step_num
-
-                # Extract unique replier names for this step
-                repliers, seen = [], set()
-                for msg in rep_msgs:
-                    c   = msg.get('contact') or {}
-                    cid = c.get('id') or msg.get('to_email', '')
-                    if cid and cid not in seen:
-                        seen.add(cid)
-                        name = (c.get('name') or
-                                f"{c.get('first_name') or ''} {c.get('last_name') or ''}".strip() or
-                                msg.get('to_email', 'Unknown'))
-                        repliers.append(name)
-
-                steps.append({
-                    'step':     step_num,
-                    'sent':     sent,
-                    'opened':   opened,
-                    'bounced':  bounced,
-                    'replied':  replied,
-                    'repliers': repliers,
-                })
+            for pos, st in sorted_steps:
+                if st['sent'] > 0:
+                    current_step = pos
 
             results.append({
                 'name':          seq.get('name', 'Unknown'),
                 'active':        seq.get('active', False),
                 'num_steps':     num_steps,
                 'current_step':  current_step,
-                'steps':         steps,
-                'total_replied': sum(s['replied'] for s in steps),
+                'steps':         [{
+                    'step':     pos,
+                    'sent':     st['sent'],
+                    'opened':   st['opened'],
+                    'bounced':  st['bounced'],
+                    'replied':  st['replied'],
+                    'repliers': sorted(st['repliers']),
+                } for pos, st in sorted_steps],
+                'total_replied': sum(st['replied'] for _, st in sorted_steps),
             })
 
         return results
@@ -517,6 +473,8 @@ def get_apollo_data():
         return [{'name': 'Apollo fetch failed', 'error': str(e),
                  'active': False, 'num_steps': 0, 'current_step': None,
                  'steps': [], 'total_replied': 0}]
+
+
 
 
 def _apollo_html(apollo_data):
