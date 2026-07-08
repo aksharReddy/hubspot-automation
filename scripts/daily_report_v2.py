@@ -363,11 +363,13 @@ def _apollo_seq_detail(seq_id):
     return r.json().get('emailer_campaign', {}) if r.status_code == 200 else {}
 
 
-def _fetch_all_messages(seq_id):
-    """Paginate through all messages for a sequence."""
+def _fetch_messages(seq_id, stat_filter=None):
+    """Paginate through messages for a sequence, optionally filtered by stat."""
     msgs, page = [], 1
     while page <= 50:
         params = [('emailer_campaign_ids[]', seq_id), ('per_page', 100), ('page', page)]
+        if stat_filter:
+            params.append(('emailer_message_stats[]', stat_filter))
         r = requests.get(f'{APOLLO_BASE}/emailer_messages/search',
                          headers=APOLLO_HEADERS, params=params)
         if r.status_code != 200:
@@ -419,16 +421,12 @@ def get_apollo_data():
                 for i, s in enumerate(steps_meta)
             }
 
-            all_msgs = _fetch_all_messages(sid)
-            # DEBUG: print status breakdown for this sequence
-            from collections import Counter
-            status_counts = Counter(str(m.get('status') or '').lower() for m in all_msgs)
-            reply_count   = sum(1 for m in all_msgs if m.get('replied') or m.get('reply_class'))
-            bounce_count  = sum(1 for m in all_msgs if m.get('bounce') or str(m.get('status') or '').lower() == 'bounced')
-            pos_counts    = Counter(m.get('campaign_position') for m in all_msgs)
-            print(f'[APOLLO] {seq.get("name")} | total_msgs={len(all_msgs)} | statuses={dict(status_counts)} | positions={dict(pos_counts)} | replied={reply_count} | bounce={bounce_count}')
+            # Apollo's raw status field uses: 'completed', 'scheduled', 'failed'
+            # 'completed' = delivered to inbox
+            # 'failed'    = bounced / spam blocked / unreachable
+            # Opened is NOT a status value — use the stat filter fetch separately
 
-            for msg in all_msgs:
+            for msg in _fetch_messages(sid):
                 pos    = msg.get('campaign_position')
                 status = str(msg.get('status') or '').lower()
 
@@ -436,17 +434,23 @@ def get_apollo_data():
                     step_stats[pos] = {'sent': 0, 'opened': 0, 'bounced': 0,
                                        'replied': 0, 'repliers': set()}
 
-                is_replied = bool(msg.get('replied') or msg.get('reply_class'))
-                if status in ('delivered', 'not_opened', 'opened', 'clicked', 'unsubscribed') or is_replied:
+                if status == 'completed':
                     step_stats[pos]['sent'] += 1
-                if status in ('opened', 'clicked') or is_replied:
-                    step_stats[pos]['opened'] += 1
-                if status == 'bounced' or msg.get('bounce'):
+                if status == 'failed':
                     step_stats[pos]['bounced'] += 1
-                if is_replied:
+                if msg.get('replied') or msg.get('reply_class'):
                     name = msg.get('to_name') or msg.get('to_email', 'Unknown')
                     step_stats[pos]['repliers'].add(name)
                     step_stats[pos]['replied'] += 1
+                    step_stats[pos]['opened'] += 1  # replied implies opened
+
+            # Opened: use stat filter (separate from raw status field)
+            for msg in _fetch_messages(sid, stat_filter='opened'):
+                pos = msg.get('campaign_position')
+                if pos in step_stats:
+                    # Only add if not already counted via reply
+                    if not (msg.get('replied') or msg.get('reply_class')):
+                        step_stats[pos]['opened'] += 1
 
             sorted_steps = sorted(
                 step_stats.items(),
