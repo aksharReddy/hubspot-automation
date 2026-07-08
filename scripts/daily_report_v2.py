@@ -433,7 +433,8 @@ def get_apollo_data():
                                        'replied': 0, 'repliers': set()}
 
                 is_replied = bool(msg.get('replied') or msg.get('reply_class'))
-                if status and status not in ('scheduled', 'drafted'):
+                # delivered = actually reached inbox (excludes bounced/spam/failed)
+                if status in ('delivered', 'not_opened', 'opened', 'clicked', 'unsubscribed') or is_replied:
                     step_stats[pos]['sent'] += 1
                 if status in ('opened', 'clicked') or is_replied:
                     step_stats[pos]['opened'] += 1
@@ -533,7 +534,7 @@ def _apollo_html(apollo_data):
   <table width="100%" cellpadding="0" cellspacing="0">
     <tr style="background:#f8fafc;">
       <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:left;font-weight:600;">STEP</th>
-      <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">SENT</th>
+      <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">DELIVERED</th>
       <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">OPENED</th>
       <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">OPEN %</th>
       <th style="padding:6px 12px;font-size:11px;color:#94a3b8;text-align:center;font-weight:600;">REPLIED</th>
@@ -952,7 +953,7 @@ def format_pdf(data, ai_insight, apollo_data=None):
                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             if seq['steps']:
                 pdf.tbl_header([
-                    ('Step', 25), ('Sent', 28), ('Opened', 28), ('Open%', 22),
+                    ('Step', 25), ('Delivered', 28), ('Opened', 28), ('Open%', 22),
                     ('Replied', 28), ('Reply%', 22), ('Bounced', 33),
                 ])
                 for i, s in enumerate(seq['steps']):
