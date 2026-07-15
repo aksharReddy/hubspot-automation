@@ -1,9 +1,72 @@
 import requests, os, json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 TOKEN = os.environ['HUBSPOT_TOKEN']
 HEADERS = {'Authorization': f'Bearer {TOKEN}'}
 BASE = 'https://api.hubapi.com'
+IST = timezone(timedelta(hours=5, minutes=30))
+NOW = datetime.now(IST)
+
+def fetch_meetings(label, start_dt, end_dt):
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms   = int(end_dt.timestamp() * 1000)
+    r = requests.post(f'{BASE}/crm/v3/objects/meetings/search',
+        headers={**HEADERS, 'Content-Type': 'application/json'},
+        json={
+            'filterGroups': [{'filters': [{
+                'propertyName': 'hs_meeting_start_time',
+                'operator': 'BETWEEN',
+                'value': str(start_ms),
+                'highValue': str(end_ms)
+            }]}],
+            'properties': ['hs_meeting_title', 'hs_meeting_start_time',
+                           'hs_meeting_end_time', 'hs_meeting_body',
+                           'hs_meeting_outcome', 'hs_internal_meeting_notes',
+                           'hubspot_owner_id'],
+            'sorts': [{'propertyName': 'hs_meeting_start_time', 'direction': 'ASCENDING'}],
+            'limit': 50
+        })
+    meetings = r.json().get('results', []) if r.status_code == 200 else []
+    print(f"\n=== {label} ({start_dt.strftime('%d %b %Y')}) — {len(meetings)} meeting(s) ===")
+    if not meetings:
+        print("  None found")
+        return meetings
+    for m in meetings:
+        p   = m['properties']
+        ts  = p.get('hs_meeting_start_time')
+        te  = p.get('hs_meeting_end_time')
+        def fmt(t):
+            if not t: return '-'
+            try:
+                return datetime.fromisoformat(str(t).replace('Z','+00:00')).astimezone(IST).strftime('%I:%M %p IST')
+            except: return str(t)
+        print(f"  id={m['id']}")
+        print(f"  title={p.get('hs_meeting_title')!r}")
+        print(f"  time={fmt(ts)} → {fmt(te)}")
+        print(f"  outcome={p.get('hs_meeting_outcome')}")
+        print(f"  body={( p.get('hs_meeting_body') or '' )[:200]!r}")
+        print(f"  notes={( p.get('hs_internal_meeting_notes') or '' )[:200]!r}")
+        # fetch associations
+        ar = requests.get(f'{BASE}/crm/v3/objects/meetings/{m["id"]}/associations/contacts', headers=HEADERS)
+        contacts = [a['id'] for a in ar.json().get('results', [])] if ar.status_code == 200 else []
+        cr = requests.get(f'{BASE}/crm/v3/objects/meetings/{m["id"]}/associations/companies', headers=HEADERS)
+        companies = [a['id'] for a in cr.json().get('results', [])] if cr.status_code == 200 else []
+        print(f"  contact_ids={contacts}  company_ids={companies}")
+        if companies:
+            comp_r = requests.get(f'{BASE}/crm/v3/objects/companies/{companies[0]}',
+                                  headers=HEADERS, params={'properties': 'name'})
+            if comp_r.status_code == 200:
+                print(f"  company_name={comp_r.json()['properties'].get('name')}")
+        print()
+    return meetings
+
+today_start = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+today_end   = NOW.replace(hour=23, minute=59, second=59, microsecond=999999)
+tmrw_start  = today_start + timedelta(days=1)
+tmrw_end    = today_end   + timedelta(days=1)
+
+fetch_meetings("Today", today_start, today_end)
+fetch_meetings("Tomorrow", tmrw_start, tmrw_end)
 
 # Step 1: search for Diagnofirm Medical Laboratories
 print("=== Searching for Diagnofirm ===")
