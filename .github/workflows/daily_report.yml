@@ -1,9 +1,7 @@
 name: NirogGyan Daily Pulse
 
 on:
-  schedule:
-    - cron: '30 4 * * *'   # 10:00 AM IST every day
-  workflow_dispatch:         # also lets you trigger it manually from GitHub UI
+  workflow_dispatch:         # manual trigger only — schedule removed to stop duplicate reports
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
