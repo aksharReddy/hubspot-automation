@@ -1,73 +1,74 @@
 import requests, os, json
+from datetime import datetime, timezone
 
 TOKEN = os.environ['HUBSPOT_TOKEN']
 HEADERS = {'Authorization': f'Bearer {TOKEN}'}
 BASE = 'https://api.hubapi.com'
 
-# Step 1: fetch a few companies to get their IDs
-print("=== Fetching companies ===")
-r = requests.get(f'{BASE}/crm/v3/objects/companies', headers=HEADERS,
-                 params={'limit': 5, 'properties': 'name'})
+# Step 1: search for Diagnofirm Medical Laboratories
+print("=== Searching for Diagnofirm ===")
+r = requests.post(f'{BASE}/crm/v3/objects/companies/search',
+    headers={**HEADERS, 'Content-Type': 'application/json'},
+    json={
+        'filterGroups': [{'filters': [
+            {'propertyName': 'name', 'operator': 'CONTAINS_TOKEN', 'value': 'diagnofirm'}
+        ]}],
+        'properties': ['name'],
+        'limit': 5
+    })
+print(f"Status: {r.status_code}")
 companies = r.json().get('results', [])
 for c in companies:
     print(f"  id={c['id']} name={c['properties'].get('name')}")
 
-# Step 2: for each company, fetch associated engagements
-print("\n=== Company-specific engagements ===")
-all_email_types = set()
-for company in companies[:3]:
-    cid  = company['id']
-    name = company['properties'].get('name')
-    r2 = requests.get(
+if not companies:
+    print("Not found by name, trying partial...")
+    r2 = requests.post(f'{BASE}/crm/v3/objects/companies/search',
+        headers={**HEADERS, 'Content-Type': 'application/json'},
+        json={
+            'filterGroups': [{'filters': [
+                {'propertyName': 'name', 'operator': 'CONTAINS_TOKEN', 'value': 'diagno'}
+            ]}],
+            'properties': ['name'],
+            'limit': 5
+        })
+    companies = r2.json().get('results', [])
+    for c in companies:
+        print(f"  id={c['id']} name={c['properties'].get('name')}")
+
+# Step 2: fetch all engagements for this company
+if companies:
+    cid  = companies[0]['id']
+    name = companies[0]['properties'].get('name')
+    print(f"\n=== Engagements for {name} (id={cid}) ===")
+
+    eng_r = requests.get(
         f'{BASE}/engagements/v1/engagements/associated/company/{cid}/paged',
-        headers=HEADERS, params={'limit': 50}
+        headers=HEADERS, params={'limit': 100}
     )
-    if r2.status_code != 200:
-        print(f"  {name}: status={r2.status_code}")
-        continue
-    eng_list = r2.json().get('results', [])
-    types = set(e.get('engagement', {}).get('type') for e in eng_list)
-    all_email_types |= types
-    print(f"\n  Company: {name}  total_engagements={len(eng_list)}  types={types}")
-    emails = [e for e in eng_list if e.get('engagement', {}).get('type') in ('EMAIL', 'INCOMING_EMAIL', 'FORWARDED_EMAIL')]
-    print(f"  Email engagements: {len(emails)}")
-    for e in emails[:2]:
+    print(f"Status: {eng_r.status_code}")
+    all_eng = eng_r.json().get('results', [])
+    types = set(e.get('engagement', {}).get('type') for e in all_eng)
+    print(f"Total engagements: {len(all_eng)}  Types: {types}")
+
+    emails = [e for e in all_eng
+              if e.get('engagement', {}).get('type') in ('EMAIL', 'INCOMING_EMAIL', 'FORWARDED_EMAIL')]
+    print(f"Email engagements: {len(emails)}")
+
+    for e in emails:
         eng  = e.get('engagement', {})
         meta = e.get('metadata', {})
         assoc = e.get('associations', {})
-        print(f"    id={eng.get('id')} type={eng.get('type')} ts={eng.get('timestamp')}")
-        print(f"    subject={meta.get('subject')}")
-        print(f"    from={meta.get('from')}  to={meta.get('to')}")
-        body = (meta.get('text') or meta.get('html') or '')[:300]
-        print(f"    body={body!r}")
-        print(f"    contactIds={assoc.get('contactIds')} companyIds={assoc.get('companyIds')}")
-
-print(f"\nAll engagement types seen across companies: {all_email_types}")
-
-# Step 3: paginate global engagements further to find EMAIL type
-print("\n=== Global engagements paginated (looking for EMAIL type) ===")
-offset, found_email = 0, False
-for page in range(5):
-    r3 = requests.get(f'{BASE}/engagements/v1/engagements/paged', headers=HEADERS,
-                      params={'limit': 100, 'offset': offset})
-    if r3.status_code != 200:
-        break
-    data = r3.json()
-    results = data.get('results', [])
-    types = set(e.get('engagement', {}).get('type') for e in results)
-    print(f"  page {page}: offset={offset} count={len(results)} types={types}")
-    email_results = [e for e in results if e.get('engagement', {}).get('type') in ('EMAIL', 'INCOMING_EMAIL')]
-    if email_results:
-        found_email = True
-        e = email_results[0]
-        eng = e.get('engagement', {})
-        meta = e.get('metadata', {})
-        print(f"  FOUND EMAIL: id={eng.get('id')} ts={eng.get('timestamp')} subject={meta.get('subject')}")
-        print(f"  from={meta.get('from')} to={meta.get('to')}")
-        print(f"  body={( meta.get('text') or '' )[:200]!r}")
-        break
-    if not data.get('hasMore'):
-        break
-    offset = data.get('offset', offset + 100)
-if not found_email:
-    print("  No EMAIL engagement type found in global results")
+        ts_ms = eng.get('timestamp')
+        ts_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M') if ts_ms else 'unknown'
+        print(f"\n  --- Email id={eng.get('id')} ---")
+        print(f"  type={eng.get('type')}  date={ts_str}")
+        print(f"  subject={meta.get('subject')!r}")
+        print(f"  from={meta.get('from')}")
+        print(f"  to={meta.get('to')}")
+        print(f"  cc={meta.get('cc')}")
+        body = meta.get('text') or meta.get('html') or ''
+        print(f"  body_len={len(body)}  body_preview={body[:500]!r}")
+        print(f"  contactIds={assoc.get('contactIds')}  companyIds={assoc.get('companyIds')}")
+        # print all metadata keys
+        print(f"  meta keys={list(meta.keys())}")
