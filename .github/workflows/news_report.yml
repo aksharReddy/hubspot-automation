@@ -2,9 +2,9 @@ name: NirogGyan Client News Brief
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 3 * * 1'  # Monday 9:00 AM IST
-    - cron: '30 3 * * 4'  # Thursday 9:00 AM IST
+
+permissions:
+  contents: write
 
 jobs:
   send-news-report:
@@ -27,3 +27,11 @@ jobs:
           GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python scripts/news_report.py
+
+      - name: Save seen articles
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/seen_news.json
+          git diff --staged --quiet || git commit -m "Update seen news articles"
+          git push

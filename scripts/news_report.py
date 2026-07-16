@@ -17,6 +17,21 @@ BASE       = 'https://api.hubapi.com'
 HS_HEADERS = {'Authorization': f'Bearer {HUBSPOT_TOKEN}'}
 NOW           = datetime.now(timezone.utc)
 TWO_WEEKS_AGO = NOW - timedelta(days=14)
+SEEN_FILE     = 'data/seen_news.json'
+
+
+def load_seen_urls():
+    try:
+        with open(SEEN_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def save_seen_urls(urls):
+    os.makedirs('data', exist_ok=True)
+    with open(SEEN_FILE, 'w') as f:
+        json.dump(sorted(urls), f, indent=2)
 
 
 def fetch_customer_companies():
@@ -42,7 +57,7 @@ def fetch_customer_companies():
     return [c['properties']['name'] for c in companies if c['properties'].get('name')]
 
 
-def fetch_news(company_name):
+def fetch_news(company_name, seen_urls):
     try:
         q   = quote_plus(f'"{company_name}"')
         url = f'https://news.google.com/rss/search?q={q}&hl=en&gl=IN&ceid=IN:en'
@@ -55,6 +70,8 @@ def fetch_news(company_name):
             title = item.findtext('title') or ''
             link  = item.findtext('link') or ''
             pub   = item.findtext('pubDate') or ''
+            if link in seen_urls:
+                continue
             try:
                 pub_dt  = parsedate_to_datetime(pub).astimezone(timezone.utc) if pub else None
                 if pub_dt and pub_dt < TWO_WEEKS_AGO:
@@ -288,6 +305,10 @@ def send_to_discord(webhook_url, pdf_bytes, date_str):
 
 
 if __name__ == '__main__':
+    print('Loading previously seen articles...')
+    seen_urls = load_seen_urls()
+    print(f'{len(seen_urls)} articles already seen\n')
+
     print('Fetching customer companies from HubSpot...')
     companies = fetch_customer_companies()
     print(f'Found {len(companies)} customer companies\n')
@@ -297,7 +318,7 @@ if __name__ == '__main__':
 
     for i, name in enumerate(companies):
         print(f'[{i+1}/{len(companies)}] {name}', end=' ... ', flush=True)
-        news = fetch_news(name)
+        news = fetch_news(name, seen_urls)
         if news:
             analysis = analyze_company_news(name, news)
             if analysis is None:
@@ -307,7 +328,7 @@ if __name__ == '__main__':
                 companies_with_news.append({'name': name, 'news': news, **analysis})
                 print(analysis['signal'])
         else:
-            print('no news')
+            print('no news / already seen')
             companies_without_news.append(name)
         time.sleep(0.5)
 
@@ -325,4 +346,10 @@ if __name__ == '__main__':
 
     print('Sending to Discord...')
     status = send_to_discord(DISCORD_WEBHOOK, pdf_bytes, date_str)
-    print(f'Done. Discord status: {status}')
+    print(f'Discord status: {status}')
+
+    # Save all newly reported article URLs so they are skipped next run
+    new_urls = {n['link'] for c in companies_with_news for n in c['news']}
+    save_seen_urls(seen_urls | new_urls)
+    print(f'Saved {len(new_urls)} new article URLs to {SEEN_FILE}')
+    print('Done.')
