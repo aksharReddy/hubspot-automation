@@ -1,25 +1,22 @@
 import os
 import re
 import time
+import json
 import requests
-import smtplib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from urllib.parse import quote_plus
+from fpdf import FPDF, XPos, YPos
 
-HUBSPOT_TOKEN      = os.environ['HUBSPOT_TOKEN']
-GROQ_API_KEY       = os.environ['GROQ_API_KEY']
-GMAIL_ADDRESS      = os.environ['GMAIL_ADDRESS']
-GMAIL_APP_PASSWORD = os.environ['GMAIL_APP_PASSWORD']
-RECIPIENT_EMAIL    = os.environ['RECIPIENT_EMAIL']
+HUBSPOT_TOKEN   = os.environ['HUBSPOT_TOKEN']
+GROQ_API_KEY    = os.environ['GROQ_API_KEY']
+DISCORD_WEBHOOK = os.environ['DISCORD_WEBHOOK']
 
 BASE       = 'https://api.hubapi.com'
 HS_HEADERS = {'Authorization': f'Bearer {HUBSPOT_TOKEN}'}
-NOW            = datetime.now(timezone.utc)
-TWO_WEEKS_AGO  = NOW - timedelta(days=14)
+NOW           = datetime.now(timezone.utc)
+TWO_WEEKS_AGO = NOW - timedelta(days=14)
 
 
 def fetch_customer_companies():
@@ -58,7 +55,6 @@ def fetch_news(company_name):
             title = item.findtext('title') or ''
             link  = item.findtext('link') or ''
             pub   = item.findtext('pubDate') or ''
-            desc  = re.sub(r'<[^>]+>', '', item.findtext('description') or '').strip()
             try:
                 pub_dt  = parsedate_to_datetime(pub).astimezone(timezone.utc) if pub else None
                 if pub_dt and pub_dt < TWO_WEEKS_AGO:
@@ -67,13 +63,13 @@ def fetch_news(company_name):
             except Exception:
                 pub_str = ''
             if title:
-                items.append({'title': title, 'link': link, 'date': pub_str, 'snippet': desc[:200]})
+                items.append({'title': title, 'link': link, 'date': pub_str})
         return items
     except Exception:
         return []
 
 
-def call_groq(prompt, max_tokens=350):
+def call_groq(prompt, max_tokens=200):
     try:
         r = requests.post(
             'https://api.groq.com/openai/v1/chat/completions',
@@ -95,6 +91,7 @@ IRRELEVANT_PHRASES = [
     'unaffected', 'lack of relevance', 'does not directly', 'does not intersect',
     'no immediate implication', 'not related', 'no direct', 'unrelated',
 ]
+
 
 def analyze_company_news(company_name, news_items):
     headlines = '\n'.join(f'- {n["title"]} ({n["date"]})' for n in news_items)
@@ -122,9 +119,7 @@ Rules:
             break
     summary = re.sub(r'\n?SIGNAL:.*', '', response, flags=re.IGNORECASE).strip()
 
-    # Catch cases where model describes irrelevance instead of returning IRRELEVANT
-    summary_lower = summary.lower()
-    if signal == 'NEUTRAL' and any(phrase in summary_lower for phrase in IRRELEVANT_PHRASES):
+    if signal == 'NEUTRAL' and any(p in summary.lower() for p in IRRELEVANT_PHRASES):
         return None
 
     return {'signal': signal, 'summary': summary}
@@ -132,128 +127,164 @@ Rules:
 
 def get_global_summary(companies_with_news):
     if not companies_with_news:
-        return 'No news found for any client companies in the last two weeks.'
+        return 'No relevant news found for any client companies in the last two weeks.'
     lines = [f'- {c["name"]} [{c["signal"]}]: {c["summary"][:120]}' for c in companies_with_news]
-    prompt = f"""NirogGyan is a B2B healthcare SaaS company in India. Here is a summary of recent news about their clients:
+    prompt = f"""NirogGyan is a B2B healthcare SaaS company in India. Recent news about their clients:
 
 {chr(10).join(lines)}
 
-Write 2-3 sentences of the most important cross-company insights — patterns, risks, or opportunities NirogGyan should be aware of across their client base. Plain text only."""
+Write 2-3 sentences of the most important cross-company insights — patterns, risks, or opportunities NirogGyan should be aware of. Plain text only."""
     return call_groq(prompt, max_tokens=200)
 
 
-def format_html(companies_with_news, companies_without_news, global_summary, date_range):
-    signal_style = {
-        'RISK':        ('#fef2f2', '#fca5a5', '#b91c1c', '#fee2e2'),
-        'OPPORTUNITY': ('#f0fdf4', '#86efac', '#166534', '#dcfce7'),
-        'NEUTRAL':     ('#f8fafc', '#cbd5e1', '#475569', '#f1f5f9'),
-    }
+def pdf_safe(text):
+    t = str(text)
+    char_map = {'–': '-', '—': '-', '’': "'", '‘': "'", '“': '"', '”': '"'}
+    for src, dst in char_map.items():
+        t = t.replace(src, dst)
+    return t.encode('latin-1', errors='replace').decode('latin-1')
 
-    company_cards = ''
-    for c in companies_with_news:
-        bg, border_color, text_color, badge_bg = signal_style.get(c['signal'], signal_style['NEUTRAL'])
-        news_items_html = ''
-        for n in c['news']:
-            news_items_html += (
-                f'<div style="padding:7px 0;border-bottom:1px solid #f1f5f9;">'
-                f'<a href="{n["link"]}" style="font-size:13px;color:#1a56a0;text-decoration:none;font-weight:500;">{n["title"]}</a>'
-                f'<span style="font-size:11px;color:#94a3b8;margin-left:8px;">{n["date"]}</span>'
-                f'</div>'
-            )
-        company_cards += f'''
-<div style="border:1px solid {border_color};border-left:4px solid {text_color};border-radius:8px;margin-bottom:14px;background:{bg};">
-  <div style="padding:12px 16px;display:flex;justify-content:space-between;align-items:center;">
-    <span style="font-size:14px;font-weight:700;color:#0f2744;">{c["name"]}</span>
-    <span style="display:inline-block;padding:3px 12px;border-radius:12px;background:{badge_bg};color:{text_color};font-size:11px;font-weight:700;letter-spacing:0.5px;">{c["signal"]}</span>
-  </div>
-  <div style="padding:0 16px 12px;">
-    <p style="margin:0 0 10px;font-size:13px;color:#1e3a5f;line-height:1.8;">{c["summary"]}</p>
-    <div style="background:white;border-radius:6px;padding:4px 12px;">{news_items_html}</div>
-  </div>
-</div>'''
 
-    no_news_section = ''
-    if companies_without_news:
-        names = ', '.join(sorted(companies_without_news))
-        no_news_section = f'''
-  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
-  <tr><td style="background:#fff;padding:20px 32px 24px;">
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">&#9632; No News This Period</div>
-    <p style="font-size:13px;color:#94a3b8;margin:0;line-height:1.9;">{names}</p>
-  </td></tr>'''
+def build_pdf(companies_with_news, companies_without_news, global_summary, date_range):
+    pdf = FPDF()
+    pdf.set_margins(14, 14, 14)
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
 
+    # Header bar
+    pdf.set_fill_color(15, 39, 68)
+    pdf.rect(0, 0, 210, 24, 'F')
+    pdf.set_font('Helvetica', 'B', 14)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(14, 7)
+    pdf.cell(0, 10, 'NirogGyan  |  Client News Brief', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font('Helvetica', '', 9)
+    pdf.set_text_color(180, 200, 220)
+    pdf.set_xy(14, 17)
+    pdf.cell(0, 6, pdf_safe(date_range), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(10)
+
+    # Stats row
     risk_count = sum(1 for c in companies_with_news if c['signal'] == 'RISK')
     opp_count  = sum(1 for c in companies_with_news if c['signal'] == 'OPPORTUNITY')
     neu_count  = sum(1 for c in companies_with_news if c['signal'] == 'NEUTRAL')
+    stats = [
+        (str(risk_count),                  'Risk Signals',  (185, 28,  28)),
+        (str(opp_count),                   'Opportunities', (22,  101, 52)),
+        (str(neu_count),                   'Neutral',       (71,  85,  105)),
+        (str(len(companies_without_news)), 'No News',       (15,  39,  68)),
+    ]
+    col_w  = 45
+    row_y  = pdf.get_y()
+    for i, (val, label, color) in enumerate(stats):
+        x = 14 + i * col_w
+        pdf.set_xy(x, row_y)
+        pdf.set_font('Helvetica', 'B', 18)
+        pdf.set_text_color(*color)
+        pdf.cell(col_w, 10, val, align='C')
+    pdf.ln(10)
+    label_y = pdf.get_y()
+    for i, (_, label, _) in enumerate(stats):
+        x = 14 + i * col_w
+        pdf.set_xy(x, label_y)
+        pdf.set_font('Helvetica', '', 8)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(col_w, 6, label, align='C')
+    pdf.ln(12)
+    pdf.set_x(14)
 
-    return f'''<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:20px;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:720px;margin:0 auto;">
+    # AI Summary
+    W = pdf.w - pdf.l_margin - pdf.r_margin
+    pdf.set_fill_color(248, 250, 255)
+    pdf.set_draw_color(199, 217, 245)
+    pdf.set_font('Helvetica', 'B', 9)
+    pdf.set_text_color(15, 39, 68)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(W, 7, '  AI SUMMARY', fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font('Helvetica', '', 9)
+    pdf.set_text_color(30, 58, 138)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(W, 6, pdf_safe(f'  {global_summary}'), fill=True)
+    pdf.ln(6)
 
-  <tr><td style="background:linear-gradient(135deg,#0f2744,#1a56a0);border-radius:12px 12px 0 0;padding:28px 32px;">
-    <div style="color:white;font-size:22px;font-weight:700;letter-spacing:-0.5px;">NirogGyan Client News Brief</div>
-    <div style="color:rgba(255,255,255,0.65);font-size:13px;margin-top:4px;">{date_range} &nbsp;|&nbsp; {len(companies_with_news)} of {len(companies_with_news) + len(companies_without_news)} clients in the news</div>
-  </td></tr>
+    # Company sections
+    signal_labels = {'RISK': '[RISK]', 'OPPORTUNITY': '[OPPORTUNITY]', 'NEUTRAL': '[NEUTRAL]'}
+    signal_colors = {
+        'RISK':        (185, 28,  28),
+        'OPPORTUNITY': (22,  101, 52),
+        'NEUTRAL':     (71,  85,  105),
+    }
 
-  <tr><td style="background:#fff;padding:0;">
-    <table width="100%" cellpadding="0" cellspacing="0"><tr>
-      <td width="25%" style="padding:20px;text-align:center;border-right:1px solid #f1f5f9;">
-        <div style="font-size:28px;font-weight:700;color:#b91c1c;">{risk_count}</div>
-        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">Risk Signals</div>
-      </td>
-      <td width="25%" style="padding:20px;text-align:center;border-right:1px solid #f1f5f9;">
-        <div style="font-size:28px;font-weight:700;color:#166534;">{opp_count}</div>
-        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">Opportunities</div>
-      </td>
-      <td width="25%" style="padding:20px;text-align:center;border-right:1px solid #f1f5f9;">
-        <div style="font-size:28px;font-weight:700;color:#475569;">{neu_count}</div>
-        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">Neutral</div>
-      </td>
-      <td width="25%" style="padding:20px;text-align:center;">
-        <div style="font-size:28px;font-weight:700;color:#0f2744;">{len(companies_without_news)}</div>
-        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">No News</div>
-      </td>
-    </tr></table>
-  </td></tr>
+    for c in companies_with_news:
+        if pdf.h - pdf.b_margin - pdf.get_y() < 40:
+            pdf.add_page()
 
-  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+        color = signal_colors.get(c['signal'], (71, 85, 105))
+        label = signal_labels.get(c['signal'], '')
 
-  <tr><td style="background:#fff;padding:16px 32px;">
-    <div style="background:#f8faff;border:1px solid #c7d9f5;border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:18px 22px;">
-      <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">&#9733; AI Summary</div>
-      <p style="margin:0;font-size:13px;color:#1e3a5f;line-height:1.8;">{global_summary}</p>
-    </div>
-  </td></tr>
+        # Company name + signal badge
+        pdf.set_font('Helvetica', 'B', 11)
+        pdf.set_text_color(15, 39, 68)
+        pdf.cell(0, 8, pdf_safe(c['name']), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.set_text_color(*color)
+        pdf.cell(0, 5, label, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-  <tr><td style="background:#fff;padding:24px 32px;">
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:16px;">&#9632; Client News — Risks First</div>
-    {company_cards if company_cards else '<p style="font-size:13px;color:#94a3b8;">No client news found in the last two weeks.</p>'}
-  </td></tr>
+        # Summary
+        pdf.set_font('Helvetica', '', 9)
+        pdf.set_text_color(30, 41, 59)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(W, 6, pdf_safe(c['summary']))
+        pdf.ln(2)
 
-  {no_news_section}
+        # News articles
+        for n in c['news']:
+            pdf.set_font('Helvetica', 'I', 8)
+            pdf.set_text_color(26, 86, 160)
+            line = pdf_safe(f'  * {n["title"]}')
+            if n['date']:
+                line += pdf_safe(f'  ({n["date"]})')
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(W, 5, line)
 
-  <tr><td style="background:#0f2744;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
-    <div style="color:rgba(255,255,255,0.5);font-size:11px;">NirogGyan &nbsp;|&nbsp; Bi-weekly client news brief &nbsp;|&nbsp; {date_range}</div>
-  </td></tr>
+        pdf.ln(6)
+        pdf.set_draw_color(241, 245, 249)
+        pdf.line(14, pdf.get_y(), 196, pdf.get_y())
+        pdf.ln(4)
 
-</table>
-</body>
-</html>'''
+    # No news section
+    if companies_without_news:
+        if pdf.h - pdf.b_margin - pdf.get_y() < 30:
+            pdf.add_page()
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.set_fill_color(248, 250, 252)
+        pdf.set_text_color(15, 39, 68)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(W, 7, '  NO NEWS THIS PERIOD', fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font('Helvetica', '', 8)
+        pdf.set_text_color(100, 116, 139)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(W, 6, pdf_safe('  ' + ', '.join(sorted(companies_without_news))))
+
+    # Footer
+    pdf.set_y(-14)
+    pdf.set_font('Helvetica', 'I', 8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(0, 8, pdf_safe(f'NirogGyan Client News Brief  |  {date_range}'), align='C')
+
+    return bytes(pdf.output())
 
 
-def send_email(subject, html_body):
-    msg            = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From']    = GMAIL_ADDRESS
-    msg['To']      = RECIPIENT_EMAIL
-    msg.attach(MIMEText(html_body, 'html'))
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_string())
+def send_to_discord(webhook_url, pdf_bytes, date_str):
+    filename = f'NirogGyan_News_Brief_{date_str.replace(" ", "_")}.pdf'
+    message  = f'Here is the CRM News Brief for {date_str}'
+    r = requests.post(
+        webhook_url,
+        data={'payload_json': json.dumps({'content': message})},
+        files={'file': (filename, pdf_bytes, 'application/pdf')}
+    )
+    return r.status_code
 
 
 if __name__ == '__main__':
@@ -265,19 +296,18 @@ if __name__ == '__main__':
     companies_without_news = []
 
     for i, name in enumerate(companies):
-        print(f'[{i+1}/{len(companies)}] {name}')
+        print(f'[{i+1}/{len(companies)}] {name}', end=' ... ', flush=True)
         news = fetch_news(name)
         if news:
-            print(f'  {len(news)} articles — analyzing...')
             analysis = analyze_company_news(name, news)
             if analysis is None:
-                print(f'  Irrelevant, skipped')
+                print('irrelevant, skipped')
                 companies_without_news.append(name)
             else:
                 companies_with_news.append({'name': name, 'news': news, **analysis})
-                print(f'  Signal: {analysis["signal"]}')
+                print(analysis['signal'])
         else:
-            print(f'  No news')
+            print('no news')
             companies_without_news.append(name)
         time.sleep(0.5)
 
@@ -287,10 +317,12 @@ if __name__ == '__main__':
     print('\nGenerating global AI summary...')
     global_summary = get_global_summary(companies_with_news)
 
-    date_range = f'{TWO_WEEKS_AGO.strftime("%d %b")} – {NOW.strftime("%d %b %Y")}'
-    subject    = f'NirogGyan Client News Brief — {NOW.strftime("%d %b %Y")}'
+    date_range = f'{TWO_WEEKS_AGO.strftime("%d %b")} - {NOW.strftime("%d %b %Y")}'
+    date_str   = NOW.strftime('%d %b %Y')
 
-    print('Building HTML and sending email...')
-    html = format_html(companies_with_news, companies_without_news, global_summary, date_range)
-    send_email(subject, html)
-    print('Done. Email sent.')
+    print('Building PDF...')
+    pdf_bytes = build_pdf(companies_with_news, companies_without_news, global_summary, date_range)
+
+    print('Sending to Discord...')
+    status = send_to_discord(DISCORD_WEBHOOK, pdf_bytes, date_str)
+    print(f'Done. Discord status: {status}')

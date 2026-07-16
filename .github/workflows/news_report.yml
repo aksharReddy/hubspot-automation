@@ -19,13 +19,11 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests fpdf2
 
       - name: Run news report
         env:
-          HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
-          GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
-          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          RECIPIENT_EMAIL:    ${{ secrets.RECIPIENT_EMAIL }}
+          HUBSPOT_TOKEN:   ${{ secrets.HUBSPOT_TOKEN }}
+          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python scripts/news_report.py
