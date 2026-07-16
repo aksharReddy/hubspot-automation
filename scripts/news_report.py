@@ -90,27 +90,43 @@ def call_groq(prompt, max_tokens=350):
         return f'AI unavailable: {e}'
 
 
+IRRELEVANT_PHRASES = [
+    'no connection', 'not directly', 'no relevance', 'no immediate relevance',
+    'unaffected', 'lack of relevance', 'does not directly', 'does not intersect',
+    'no immediate implication', 'not related', 'no direct', 'unrelated',
+]
+
 def analyze_company_news(company_name, news_items):
     headlines = '\n'.join(f'- {n["title"]} ({n["date"]})' for n in news_items)
-    prompt = f"""You are analyzing news about one of NirogGyan's clients. NirogGyan is a B2B healthcare SaaS company in India.
+    prompt = f"""You are a CRM analyst for NirogGyan, a B2B healthcare SaaS company in India.
 
 Company: {company_name}
-Recent news (last 2 weeks):
+News headlines:
 {headlines}
 
-In 2-3 sentences, summarize what this news means for NirogGyan's relationship with this company. Be specific and practical.
-Then on a new line write exactly one of: SIGNAL: RISK  or  SIGNAL: OPPORTUNITY  or  SIGNAL: NEUTRAL
-
-Plain text only, no bullet points, no markdown."""
+Rules:
+1. If none of these headlines are actually about {company_name} in healthcare, diagnostics, hospitals, or health tech, reply with just: IRRELEVANT
+2. Otherwise, write 1-2 sharp sentences on what this means for NirogGyan's relationship with {company_name}. Be direct — no preamble, no explaining what you checked. Just the insight.
+3. End with exactly one of: SIGNAL: RISK | SIGNAL: OPPORTUNITY | SIGNAL: NEUTRAL"""
 
     response = call_groq(prompt)
-    signal   = 'NEUTRAL'
+
+    if 'IRRELEVANT' in response.upper():
+        return None
+
+    signal = 'NEUTRAL'
     for line in response.split('\n'):
         m = re.search(r'SIGNAL:\s*(RISK|OPPORTUNITY|NEUTRAL)', line, re.IGNORECASE)
         if m:
             signal = m.group(1).upper()
             break
     summary = re.sub(r'\n?SIGNAL:.*', '', response, flags=re.IGNORECASE).strip()
+
+    # Catch cases where model describes irrelevance instead of returning IRRELEVANT
+    summary_lower = summary.lower()
+    if signal == 'NEUTRAL' and any(phrase in summary_lower for phrase in IRRELEVANT_PHRASES):
+        return None
+
     return {'signal': signal, 'summary': summary}
 
 
@@ -254,8 +270,12 @@ if __name__ == '__main__':
         if news:
             print(f'  {len(news)} articles — analyzing...')
             analysis = analyze_company_news(name, news)
-            companies_with_news.append({'name': name, 'news': news, **analysis})
-            print(f'  Signal: {analysis["signal"]}')
+            if analysis is None:
+                print(f'  Irrelevant, skipped')
+                companies_without_news.append(name)
+            else:
+                companies_with_news.append({'name': name, 'news': news, **analysis})
+                print(f'  Signal: {analysis["signal"]}')
         else:
             print(f'  No news')
             companies_without_news.append(name)
