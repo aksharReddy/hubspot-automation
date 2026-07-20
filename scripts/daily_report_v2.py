@@ -240,7 +240,6 @@ def fetch_clickup_tickets():
         r = requests.get(
             f'https://api.clickup.com/api/v2/list/{CLICKUP_LIST_ID}/task',
             headers={'Authorization': CLICKUP_TOKEN},
-            params={'include_closed': 'false', 'subtasks': 'true'},
             timeout=15
         )
         if r.status_code != 200:
