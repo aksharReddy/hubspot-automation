@@ -1,4 +1,5 @@
 import re
+import json
 import requests
 import smtplib
 import os
@@ -8,6 +9,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from fpdf import FPDF, XPos, YPos
+from google.oauth2 import service_account
+from googleapiclient.discovery import build as gcal_build
 
 
 def pdf_safe(text):
@@ -22,20 +25,12 @@ def pdf_safe(text):
     return t.encode('latin-1', errors='replace').decode('latin-1')
 
 
-def strip_markdown(text):
-    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'\*(.+?)\*', r'\1', text)
-    text = re.sub(r'`(.+?)`', r'\1', text)
-    return text
-
-
 HUBSPOT_TOKEN      = os.environ['HUBSPOT_TOKEN']
-GROQ_API_KEY       = os.environ['GROQ_API_KEY']
 GMAIL_ADDRESS      = os.environ['GMAIL_ADDRESS']
 GMAIL_APP_PASSWORD = os.environ['GMAIL_APP_PASSWORD']
 RECIPIENT_EMAIL    = os.environ['RECIPIENT_EMAIL']
 APOLLO_API_KEY     = os.environ['APOLLO_API_KEY']
+GOOGLE_SA_JSON     = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON'])
 
 HUBSPOT_HEADERS = {'Authorization': f'Bearer {HUBSPOT_TOKEN}'}
 APOLLO_BASE    = 'https://api.apollo.io/api/v1'
@@ -50,7 +45,8 @@ APOLLO_REPLY_CLASSES = [
 ]
 BASE = 'https://api.hubapi.com'
 NOW  = datetime.now(timezone.utc)
-TODAY_START    = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+IST  = timezone(timedelta(hours=5, minutes=30))
+TODAY_START    = NOW.replace(hour=0,  minute=0,  second=0,  microsecond=0)
 TODAY_END      = NOW.replace(hour=23, minute=59, second=59, microsecond=999999)
 TOMORROW_START = TODAY_START + timedelta(days=1)
 TOMORROW_END   = TODAY_END   + timedelta(days=1)
@@ -73,6 +69,10 @@ def deal_silence(d):
         days_since(p.get('notes_last_contacted')),
         days_since(p.get('hs_lastmodifieddate'))
     )
+
+
+def _is_niroggyan(name):
+    return 'niroggyan' in (name or '').lower()
 
 
 def fetch_all(obj, props):
@@ -121,7 +121,8 @@ def fetch_meetings(start_dt, end_dt):
                     'highValue': str(int(end_dt.timestamp() * 1000))
                 }]
             }],
-            'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'hs_meeting_end_time', 'hs_meeting_body', 'hs_meeting_source'],
+            'properties': ['hs_meeting_title', 'hs_meeting_start_time',
+                           'hs_meeting_end_time', 'hs_meeting_body', 'hs_meeting_source'],
             'sorts': [{'propertyName': 'hs_meeting_start_time', 'direction': 'ASCENDING'}],
             'limit': 50
         }
@@ -160,11 +161,71 @@ def parse_meeting_time(ts_val):
     if not ts_val:
         return '-'
     try:
-        dt = datetime.fromisoformat(str(ts_val).replace('Z', '+00:00'))
+        dt  = datetime.fromisoformat(str(ts_val).replace('Z', '+00:00'))
         ist = dt + timedelta(hours=5, minutes=30)
         return ist.strftime('%I:%M %p')
     except Exception:
         return '-'
+
+
+def fetch_calendar_week():
+    try:
+        today_ist  = NOW.astimezone(IST)
+        monday_ist = today_ist - timedelta(days=today_ist.weekday())
+        week_start = monday_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end   = week_start + timedelta(days=5)  # Saturday 00:00
+
+        creds  = service_account.Credentials.from_service_account_info(
+            GOOGLE_SA_JSON, scopes=['https://www.googleapis.com/auth/calendar.readonly'])
+        svc    = gcal_build('calendar', 'v3', credentials=creds, cache_discovery=False)
+        result = svc.events().list(
+            calendarId='Shweta@niroggyan.com',
+            timeMin=week_start.isoformat(),
+            timeMax=week_end.isoformat(),
+            singleEvents=True,
+            orderBy='startTime',
+        ).execute()
+
+        days      = {}
+        day_order = []
+        for e in result.get('items', []):
+            start_raw = e['start'].get('dateTime', e['start'].get('date'))
+            if 'T' in start_raw:
+                dt      = datetime.fromisoformat(start_raw).astimezone(IST)
+                end_raw = e['end'].get('dateTime', e['end'].get('date'))
+                end_dt  = datetime.fromisoformat(end_raw).astimezone(IST)
+                time_str = f'{dt.strftime("%I:%M %p")} - {end_dt.strftime("%I:%M %p")} IST'
+            else:
+                dt       = datetime.fromisoformat(start_raw).replace(tzinfo=IST)
+                time_str = 'All day'
+
+            day_key = dt.strftime('%A, %d %b')
+            if day_key not in days:
+                days[day_key] = []
+                day_order.append(day_key)
+
+            attendees = [
+                a['email'] for a in e.get('attendees', [])
+                if not a.get('self') and 'niroggyan' not in a['email'].lower()
+            ]
+            days[day_key].append({
+                'title':     e.get('summary', '(No title)'),
+                'time':      time_str,
+                'attendees': attendees,
+                'meet':      e.get('hangoutLink', ''),
+            })
+
+        return [(day, days[day]) for day in day_order]
+    except Exception as ex:
+        print(f'Calendar fetch failed: {ex}')
+        return []
+
+
+def _week_label():
+    today_ist  = NOW.astimezone(IST)
+    monday_ist = today_ist - timedelta(days=today_ist.weekday())
+    friday_ist = monday_ist + timedelta(days=4)
+    return f'{monday_ist.strftime("%d %b")} – {friday_ist.strftime("%d %b %Y")}'
 
 
 def get_data():
@@ -177,9 +238,6 @@ def get_data():
         'dealname', 'dealstage', 'amount', 'closedate',
         'notes_last_updated', 'notes_last_contacted', 'hs_lastmodifieddate',
         'hs_is_closed', 'hs_is_closed_won'
-    ])
-    tickets = fetch_all('tickets', [
-        'subject', 'hs_ticket_priority', 'hs_pipeline_stage', 'createdate'
     ])
     meetings_today    = fetch_meetings(TODAY_START, TODAY_END)
     meetings_tomorrow = fetch_meetings(TOMORROW_START, TOMORROW_END)
@@ -199,17 +257,15 @@ def get_data():
                     break
         return name_map
 
-    ticket_company_map  = build_name_map('tickets',  'companies', [t['id'] for t in tickets])
     deal_company_map    = build_name_map('deals',    'companies', [d['id'] for d in deals])
     meeting_company_map = build_name_map('meetings', 'companies', [m['id'] for m in all_meetings])
 
-    # Fetch contact phone numbers and lifecycle stage for all meetings
     meeting_phone_map = {}
     meeting_stage_map = {}
     if all_meetings:
-        mid_list = [m['id'] for m in all_meetings]
+        mid_list      = [m['id'] for m in all_meetings]
         contact_assoc = fetch_associations_batch('meetings', 'contacts', mid_list)
-        contact_ids = list({cid for cids in contact_assoc.values() for cid in cids})
+        contact_ids   = list({cid for cids in contact_assoc.values() for cid in cids})
         if contact_ids:
             r = requests.post(
                 f'{BASE}/crm/v3/objects/contacts/batch/read',
@@ -222,7 +278,7 @@ def get_data():
             if r.status_code == 200:
                 contact_info = {}
                 for c in r.json().get('results', []):
-                    p = c['properties']
+                    p     = c['properties']
                     fname = p.get('firstname') or ''
                     lname = p.get('lastname') or ''
                     name  = f'{fname} {lname}'.strip()
@@ -240,38 +296,33 @@ def get_data():
                             meeting_stage_map[mid] = info['stage']
                         break
 
-    # Fallback: parse phone_number from meeting body if not found via contact
     for m in all_meetings:
         mid = m['id']
         if meeting_phone_map.get(mid, 'Not on record') == 'Not on record':
-            body = m['properties'].get('hs_meeting_body') or ''
+            body  = m['properties'].get('hs_meeting_body') or ''
             match = re.search(r'phone_number[:\s]+([+\d][\d\s\-]{6,})', body)
             if match:
                 meeting_phone_map[mid] = match.group(1).strip()
 
-    return companies, deals, tickets, meetings_today, meetings_tomorrow, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map, meeting_stage_map
+    return (companies, deals, meetings_today, meetings_tomorrow,
+            deal_company_map, meeting_company_map, meeting_phone_map, meeting_stage_map)
 
 
-def build_report_data(companies, deals, tickets, meetings_today, meetings_tomorrow,
-                      ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map,
-                      meeting_stage_map=None):
-    open_deals    = [d for d in deals
-                     if d['properties'].get('hs_is_closed') != 'true'
-                     and d['properties'].get('hs_is_closed_won') != 'true']
-    silent_deals  = sorted(open_deals, key=deal_silence, reverse=True)[:5]
-    active_deals  = sorted(open_deals, key=deal_silence)[:5]
+def build_report_data(companies, deals, meetings_today, meetings_tomorrow,
+                      deal_company_map, meeting_company_map, meeting_phone_map,
+                      meeting_stage_map, calendar_days):
+    open_deals   = [d for d in deals
+                    if d['properties'].get('hs_is_closed') != 'true'
+                    and d['properties'].get('hs_is_closed_won') != 'true']
+    active_deals = sorted(open_deals, key=deal_silence)[:10]
 
-    open_tickets  = [t for t in tickets if t['properties'].get('hs_pipeline_stage') != '4']
-    top_tickets   = sorted(open_tickets,
-                           key=lambda t: days_since(t['properties'].get('createdate')),
-                           reverse=True)[:10]
-
-    active_cos    = [c for c in companies
-                     if days_since(c['properties'].get('notes_last_contacted')
-                                   or c['properties'].get('notes_last_updated')) <= 30]
-    active_cos    = sorted(active_cos,
-                           key=lambda c: days_since(c['properties'].get('notes_last_contacted')
-                                                    or c['properties'].get('notes_last_updated')))[:10]
+    active_cos = [c for c in companies
+                  if not _is_niroggyan(c['properties'].get('name'))
+                  and days_since(c['properties'].get('notes_last_contacted')
+                                 or c['properties'].get('notes_last_updated')) <= 30]
+    active_cos = sorted(active_cos,
+                        key=lambda c: days_since(c['properties'].get('notes_last_contacted')
+                                                 or c['properties'].get('notes_last_updated')))[:10]
 
     def meeting_ts(m):
         try:
@@ -281,134 +332,41 @@ def build_report_data(companies, deals, tickets, meetings_today, meetings_tomorr
 
     meetings_sorted          = sorted(meetings_today,    key=meeting_ts)
     meetings_tomorrow_sorted = sorted(meetings_tomorrow, key=meeting_ts)
-
     _stage_map = meeting_stage_map or {}
 
     def meeting_tuples(lst):
         rows = []
         for m in lst:
-            mid      = m['id']
-            company  = meeting_company_map.get(mid, '-')
-            phone    = meeting_phone_map.get(mid, '-')
-            agenda   = parse_agenda(m['properties'].get('hs_meeting_body', ''))
-            stage    = format_lifecycle(_stage_map.get(mid, ''))
-            source   = format_meeting_source(m['properties'].get('hs_meeting_source'))
+            mid     = m['id']
+            company = meeting_company_map.get(mid, '-')
+            if _is_niroggyan(company):
+                company = '-'
+            phone   = meeting_phone_map.get(mid, '-')
+            agenda  = parse_agenda(m['properties'].get('hs_meeting_body', ''))
+            stage   = format_lifecycle(_stage_map.get(mid, ''))
+            source  = format_meeting_source(m['properties'].get('hs_meeting_source'))
             rows.append((m, company, phone, agenda, stage, source))
         return rows
 
+    week_meetings_count = sum(len(evts) for _, evts in calendar_days)
+
     return {
-        'date':               NOW.strftime('%d %B %Y'),
-        'tomorrow_date':      (NOW + timedelta(days=1)).strftime('%d %B %Y'),
-        'silent_deals':       [(d, deal_silence(d), deal_company_map.get(d['id'], '-')) for d in silent_deals],
-        'active_deals':       [(d, deal_silence(d), deal_company_map.get(d['id'], '-')) for d in active_deals],
-        'open_tickets':       [(t, ticket_company_map.get(t['id'], '-')) for t in top_tickets],
-        'meetings':           meeting_tuples(meetings_sorted),
-        'meetings_tomorrow':  meeting_tuples(meetings_tomorrow_sorted),
-        'active_companies':   active_cos,
+        'date':              NOW.strftime('%d %B %Y'),
+        'tomorrow_date':     (NOW + timedelta(days=1)).strftime('%d %B %Y'),
+        'active_deals':      [(d, deal_silence(d), deal_company_map.get(d['id'], '-')) for d in active_deals],
+        'meetings':          meeting_tuples(meetings_sorted),
+        'meetings_tomorrow': meeting_tuples(meetings_tomorrow_sorted),
+        'active_companies':  active_cos,
         'stats': {
-            'open_deals_count':   len(open_deals),
-            'open_tickets_count': len(open_tickets),
-            'meetings_count':     len(meetings_today),
-            'active_count':       len(active_cos),
+            'open_deals_count':    len(open_deals),
+            'week_meetings_count': week_meetings_count,
+            'meetings_count':      len(meetings_today),
+            'active_count':        len(active_cos),
         }
     }
 
 
-def build_ai_context(report_data, ticket_company_map, deal_company_map, meeting_company_map):
-    report_companies = {}
-
-    def ensure(name):
-        if name and name != '-':
-            report_companies.setdefault(name, {'deals': [], 'tickets': [], 'meeting': False, 'last_contact': None, 'last_call': None})
-
-    for d, silence, company in report_data['silent_deals']:
-        ensure(company)
-        if company in report_companies:
-            p = d['properties']
-            report_companies[company]['deals'].append({
-                'name': p.get('dealname', '-'),
-                'stage': p.get('dealstage', '-'),
-                'silence': silence
-            })
-
-    for t, company in report_data['open_tickets']:
-        ensure(company)
-        if company in report_companies:
-            p = t['properties']
-            report_companies[company]['tickets'].append({
-                'subject': p.get('subject', '-'),
-                'priority': p.get('hs_ticket_priority', '?'),
-                'age': days_since(p.get('createdate'))
-            })
-
-    for m, company, _phone, *_ in report_data['meetings']:
-        ensure(company)
-        if company in report_companies:
-            report_companies[company]['meeting'] = True
-
-    for c in report_data['active_companies']:
-        p    = c['properties']
-        name = p.get('name', '-')
-        ensure(name)
-        if name in report_companies:
-            report_companies[name]['last_contact'] = days_since(
-                p.get('notes_last_contacted') or p.get('notes_last_updated'))
-            report_companies[name]['last_call'] = (p.get('hs_last_logged_call_date') or '')[:10] or 'never'
-
-    lines = [
-        "You are analyzing CRM data for NirogGyan, a B2B healthcare SaaS company in India.",
-        "Below is data ONLY for companies that appear in today's report across deals, tickets, meetings, and active conversations.",
-        "Give practical insights. Plain text only, no markdown, no ** or ##.",
-        '',
-        '--- COMPANY DATA ---',
-    ]
-
-    for name, s in report_companies.items():
-        parts = [f'Company: {name}']
-        if s['last_contact'] is not None:
-            parts.append(f'last contact: {s["last_contact"]}d ago')
-        if s['last_call']:
-            parts.append(f'last call: {s["last_call"]}')
-        if s['meeting']:
-            parts.append('has meeting TODAY')
-        if s['deals']:
-            deal_strs = [f'{d["name"]} ({d["stage"]}, {d["silence"]}d silent)' for d in s['deals']]
-            parts.append(f'open deals: {", ".join(deal_strs)}')
-        if s['tickets']:
-            tix_strs = [f'{t["subject"]} [{t["priority"]}, {t["age"]}d old]' for t in s['tickets']]
-            parts.append(f'open tickets: {", ".join(tix_strs)}')
-        lines.append('- ' + ' | '.join(parts))
-
-    lines += [
-        '',
-        '--- INSTRUCTIONS ---',
-        'Analyze the above CRM data and give insights in exactly 3 sections.',
-        'You decide what the 3 sections are based on what is most useful in the data.',
-        'Each section must start with a title line prefixed by ##, like: ## Recent Engagements',
-        'Then write 2-4 lines of practical insight below the title.',
-        'Use company names. Be specific. No bold (**), no bullet points, just plain text under each ## title.',
-    ]
-
-    return '\n'.join(lines)
-
-def get_ai_insight(context):
-    try:
-        r = requests.post(
-            'https://api.groq.com/openai/v1/chat/completions',
-            headers={'Authorization': f'Bearer {GROQ_API_KEY}',
-                     'Content-Type': 'application/json'},
-            json={
-                'model': 'llama-3.3-70b-versatile',
-                'messages': [{'role': 'user', 'content': context}],
-                'max_tokens': 500
-            }
-        )
-        return r.json()['choices'][0]['message']['content']
-    except Exception as e:
-        return f'AI analysis unavailable: {e}'
-
-
-# ── HTML ──────────────────────────────────────────────────────────────────────
+# ── Apollo ────────────────────────────────────────────────────────────────────
 
 def _apollo_seq_detail(seq_id):
     r = requests.get(f'{APOLLO_BASE}/emailer_campaigns/{seq_id}', headers=APOLLO_HEADERS)
@@ -416,7 +374,6 @@ def _apollo_seq_detail(seq_id):
 
 
 def _fetch_messages(seq_id, stat_filter=None):
-    """Paginate through messages for a sequence, optionally filtered by stat."""
     msgs, page = [], 1
     while page <= 50:
         params = [('emailer_campaign_ids[]', seq_id), ('per_page', 100), ('page', page)]
@@ -463,12 +420,10 @@ def get_apollo_data():
             steps_meta = detail.get('emailer_steps', [])
             num_steps  = len(steps_meta) or seq.get('num_steps', 0)
 
-            # Campaign-level stats from Apollo (exactly what the UI shows)
             uniq_delivered = detail.get('unique_delivered') or 0
             uniq_opened    = detail.get('unique_opened') or 0
             uniq_bounced   = detail.get('unique_bounced') or 0
 
-            # Pre-populate all steps with zero counts
             step_stats = {
                 sm.get('position', i + 1): {
                     'sent': 0, 'opened': 0, 'bounced': 0,
@@ -479,7 +434,6 @@ def get_apollo_data():
 
             all_msgs = _fetch_messages(sid)
 
-            # Count completed messages per step (for distribution ratio)
             msg_compl_per_step = {}
             for msg in all_msgs:
                 pos    = msg.get('campaign_position')
@@ -493,22 +447,17 @@ def get_apollo_data():
                     name = msg.get('to_name') or msg.get('to_email', 'Unknown')
                     step_stats[pos]['repliers'].add(name)
                     step_stats[pos]['replied'] += 1
-                    step_stats[pos]['opened'] += 1
+                    step_stats[pos]['opened']  += 1
 
-            # Distribute campaign-level unique_delivered/opened/bounced across steps.
-            # If only one step has completions, it gets the full campaign total (exact match to UI).
-            # If multiple steps are active, distribute proportionally by message count.
             total_compl = sum(msg_compl_per_step.values())
             for pos, cnt in msg_compl_per_step.items():
                 ratio = cnt / total_compl if total_compl > 0 else 0
                 step_stats[pos]['sent']    = round(uniq_delivered * ratio)
                 step_stats[pos]['bounced'] = round(uniq_bounced   * ratio)
 
-            # Opened: start from unique_opened distributed by step, then adjust for replied
             for pos, cnt in msg_compl_per_step.items():
                 ratio = cnt / total_compl if total_compl > 0 else 0
                 step_stats[pos]['opened'] = round(uniq_opened * ratio)
-            # Replies imply opened — ensure opened >= replied per step
             for pos, st in step_stats.items():
                 if st['replied'] > st['opened']:
                     step_stats[pos]['opened'] = st['replied']
@@ -545,6 +494,47 @@ def get_apollo_data():
                  'steps': [], 'total_replied': 0}]
 
 
+# ── HTML ──────────────────────────────────────────────────────────────────────
+
+def _calendar_html(calendar_days):
+    if not calendar_days:
+        return ''
+    wl    = _week_label()
+    total = sum(len(evts) for _, evts in calendar_days)
+
+    rows = ''
+    for day_label, events in calendar_days:
+        rows += (
+            f'<tr><td colspan="3" style="padding:8px 14px 4px;font-size:11px;font-weight:700;'
+            f'color:#0f2744;text-transform:uppercase;letter-spacing:0.5px;'
+            f'background:#f8fafc;border-top:2px solid #e2e8f0;">{day_label}</td></tr>'
+        )
+        for ev in events:
+            attendee_str = ', '.join(ev['attendees']) if ev['attendees'] else '—'
+            meet_badge   = ''
+            if ev['meet']:
+                meet_badge = (' <span style="display:inline-block;padding:1px 6px;border-radius:8px;'
+                              'background:#dbeafe;color:#1d4ed8;font-size:10px;font-weight:700;">Meet</span>')
+            rows += (
+                f'<tr>'
+                f'<td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-size:13px;color:#1e293b;">{ev["title"]}{meet_badge}</td>'
+                f'<td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#64748b;white-space:nowrap;">{ev["time"]}</td>'
+                f'<td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;">{attendee_str}</td>'
+                f'</tr>'
+            )
+
+    return f'''
+  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+  <tr><td style="background:#fff;padding:24px 32px;">
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#128197; Shweta\'s Calendar &mdash; {wl} ({total} meetings)</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+      <tr style="background:#f8fafc;">
+        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Meeting</th>
+        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Time (IST)</th>
+        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">External Attendees</th>
+      </tr>{rows}
+    </table>
+  </td></tr>'''
 
 
 def _apollo_html(apollo_data):
@@ -569,9 +559,9 @@ def _apollo_html(apollo_data):
         step_rows = ''
         for s in seq['steps']:
             pct = lambda n, d: f'{round(n / d * 100)}%' if d else '-'
-            open_pct    = pct(s['opened'],  s['sent'])
-            reply_pct   = pct(s['replied'], s['sent'])
-            bounce_pct  = pct(s['bounced'], s['sent'])
+            open_pct   = pct(s['opened'],  s['sent'])
+            reply_pct  = pct(s['replied'], s['sent'])
+            bounce_pct = pct(s['bounced'], s['sent'])
             replier_row = ''
             if s['repliers']:
                 names = ', '.join(s['repliers'])
@@ -620,7 +610,7 @@ def _apollo_html(apollo_data):
   </td></tr>'''
 
 
-def format_html(data, ai_insight, apollo_data=None):
+def format_html(data, calendar_days, apollo_data=None):
     stats = data['stats']
 
     def badge(text, color):
@@ -634,7 +624,7 @@ def format_html(data, ai_insight, apollo_data=None):
         return (f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
                 f'background:#{bg};color:#{fg};font-size:11px;font-weight:700;">{text}</span>')
 
-    def deal_row(d, silence, company, is_silent):
+    def deal_row(d, silence, company):
         p         = d['properties']
         name      = p.get('dealname') or '-'
         close_raw = p.get('closedate') or ''
@@ -643,25 +633,19 @@ def format_html(data, ai_insight, apollo_data=None):
             close_str = close_dt.strftime('%d %b %Y')
         except Exception:
             close_str = '-'
-        col = ('red' if silence >= 30 else 'yellow') if is_silent else ('green' if silence <= 7 else 'blue')
-        label = f'{silence}d silent' if is_silent else f'active {silence}d ago'
-        row = (
+        col   = 'green' if silence <= 7 else 'blue'
+        label = f'active {silence}d ago'
+        co    = '-' if _is_niroggyan(company) else (company or '-')
+        return (
             f'<tr>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;font-weight:500;">{name}</td>'
-        )
-        if company and company != '-':
-            row += f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{company}</td>'
-        else:
-            row += f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#94a3b8;">-</td>'
-        row += (
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{co}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;text-align:center;">{badge(label, col)}</td>'
             f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{close_str}</td>'
             f'</tr>'
         )
-        return row
 
-    silent_rows = ''.join(deal_row(d, s, c, True)  for d, s, c in data['silent_deals'])
-    active_rows = ''.join(deal_row(d, s, c, False) for d, s, c in data['active_deals'])
+    active_rows = ''.join(deal_row(d, s, c) for d, s, c in data['active_deals'])
 
     deal_th = (
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Deal</th>'
@@ -669,21 +653,6 @@ def format_html(data, ai_insight, apollo_data=None):
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Activity</th>'
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Close Date</th>'
     )
-
-    ticket_rows = ''
-    for t, company in data['open_tickets']:
-        p   = t['properties']
-        age = days_since(p.get('createdate'))
-        pri = p.get('hs_ticket_priority', '?')
-        col = 'red' if pri == 'HIGH' else 'yellow'
-        ticket_rows += (
-            f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;">{p.get("subject","-")}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{company}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;text-align:center;">{badge(pri, col)}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;text-align:center;">{age}d</td>'
-            f'</tr>'
-        )
 
     def build_meeting_rows(meeting_list, border_color='#f0f9ff'):
         rows = ''
@@ -702,7 +671,7 @@ def format_html(data, ai_insight, apollo_data=None):
                            f'background:{clr[0]};color:{clr[1]};font-size:10px;font-weight:700;'
                            f'margin-left:4px;">{source}</span>')
             bottom = f'border-bottom:1px solid {border_color};' if not agenda else ''
-            rows += (
+            rows  += (
                 f'<tr>'
                 f'<td style="padding:10px 14px;{bottom}font-size:13px;color:#1e293b;">{title}{badges}</td>'
                 f'<td style="padding:10px 14px;{bottom}font-size:12px;color:#64748b;">{company}</td>'
@@ -738,20 +707,6 @@ def format_html(data, ai_insight, apollo_data=None):
             f'</tr>'
         )
 
-    ai_html = ''
-    for line in ai_insight.strip().split('\n'):
-        s = line.strip()
-        if not s:
-            ai_html += '<div style="height:10px;"></div>'
-        elif s.startswith('##'):
-            title = s.lstrip('#').strip()
-            ai_html += (f'<p style="margin:16px 0 6px;font-size:12px;font-weight:700;'
-                        f'color:#0f2744;text-transform:uppercase;letter-spacing:1px;'
-                        f'border-bottom:1px solid #e2e8f0;padding-bottom:4px;">{title}</p>')
-        else:
-            s = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', s)
-            ai_html += f'<p style="margin:4px 0;font-size:13px;color:#1e3a5f;line-height:1.7;">{s}</p>'
-
     meeting_th = '''
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Title</th>
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>
@@ -759,14 +714,14 @@ def format_html(data, ai_insight, apollo_data=None):
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Phone</th>'''
 
     today_block = f'''
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; Meetings Today — {data["date"]} ({stats["meetings_count"]})</div>
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; HubSpot Meetings Today &mdash; {data["date"]} ({stats["meetings_count"]})</div>
     ''' + (f'''<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bfdbfe;border-radius:8px;overflow:hidden;">
       <tr style="background:#eff6ff;">{meeting_th}</tr>{meeting_rows}
     </table>''' if data['meetings'] else '<p style="font-size:13px;color:#94a3b8;margin:0 0 4px;">No meetings scheduled for today.</p>')
 
     tmrw_count = len(data['meetings_tomorrow'])
     tmrw_block = f'''
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin:20px 0 14px;">&#9632; Meetings Tomorrow — {data["tomorrow_date"]} ({tmrw_count})</div>
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin:20px 0 14px;">&#9632; HubSpot Meetings Tomorrow &mdash; {data["tomorrow_date"]} ({tmrw_count})</div>
     ''' + (f'''<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;border-radius:8px;overflow:hidden;">
       <tr style="background:#f0fdf4;">{meeting_th}</tr>{meeting_tomorrow_rows}
     </table>''' if data['meetings_tomorrow'] else '<p style="font-size:13px;color:#94a3b8;margin:0;">No meetings scheduled for tomorrow.</p>')
@@ -796,8 +751,8 @@ def format_html(data, ai_insight, apollo_data=None):
         <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">Open Deals</div>
       </td>
       <td width="25%" style="padding:20px;text-align:center;border-right:1px solid #f1f5f9;">
-        <div style="font-size:28px;font-weight:700;color:#0f2744;">{stats["open_tickets_count"]}</div>
-        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">Open Tickets</div>
+        <div style="font-size:28px;font-weight:700;color:#0f2744;">{stats["week_meetings_count"]}</div>
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:2px;">Week Meetings</div>
       </td>
       <td width="25%" style="padding:20px;text-align:center;border-right:1px solid #f1f5f9;">
         <div style="font-size:28px;font-weight:700;color:#0f2744;">{stats["meetings_count"]}</div>
@@ -810,26 +765,14 @@ def format_html(data, ai_insight, apollo_data=None):
     </tr></table>
   </td></tr>
 
-  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+  {_calendar_html(calendar_days)}
 
-  <tr><td style="background:#fff;padding:16px 32px;">
-    <div style="background:#f8faff;border:1px solid #c7d9f5;border-left:4px solid #1a56a0;border-radius:0 10px 10px 0;padding:18px 22px;">
-      <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">&#9733; AI Analysis</div>
-      {ai_html}
-    </div>
-  </td></tr>
+  {meetings_section}
 
   <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
-
-  <tr><td style="background:#fff;padding:24px 32px 12px;">
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; 5 Most Silent Deals — Needs Follow-Up</div>
-    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #fecaca;border-radius:8px;overflow:hidden;">
-      <tr style="background:#fef2f2;">{deal_th}</tr>{silent_rows}
-    </table>
-  </td></tr>
 
   <tr><td style="background:#fff;padding:12px 32px 24px;">
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; 5 Most Active Deals — Recently Engaged</div>
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; 10 Most Active Deals &mdash; Recently Engaged</div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;border-radius:8px;overflow:hidden;">
       <tr style="background:#f0fdf4;">{deal_th}</tr>{active_rows}
     </table>
@@ -846,22 +789,6 @@ def format_html(data, ai_insight, apollo_data=None):
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Last Call</th>
         <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Stage</th>
       </tr>{company_rows}
-    </table>
-  </td></tr>
-
-  {meetings_section}
-
-  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
-
-  <tr><td style="background:#fff;padding:24px 32px;">
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; Top 10 Open Tickets</div>
-    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
-      <tr style="background:#f8fafc;">
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Subject</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Priority</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Age</th>
-      </tr>{ticket_rows}
     </table>
   </td></tr>
 
@@ -923,7 +850,7 @@ class PulsePDF(FPDF):
         self.ln()
 
 
-def format_pdf(data, ai_insight, apollo_data=None):
+def format_pdf(data, calendar_days, apollo_data=None):
     stats = data['stats']
 
     pdf = PulsePDF()
@@ -940,7 +867,7 @@ def format_pdf(data, ai_insight, apollo_data=None):
     pdf.set_font('Helvetica', 'B', 9)
     pdf.set_text_color(255, 255, 255)
     for label, val in [('Open Deals', stats['open_deals_count']),
-                       ('Open Tickets', stats['open_tickets_count']),
+                       ('Week Meetings', stats['week_meetings_count']),
                        ('Meetings Today', stats['meetings_count']),
                        ('Active This Month', stats['active_count'])]:
         pdf.cell(46, 12, pdf_safe(f'{val}  {label}'), fill=True, align='C')
@@ -953,30 +880,41 @@ def format_pdf(data, ai_insight, apollo_data=None):
     def pdf_close(d):
         raw = d['properties'].get('closedate') or ''
         try:
-            return datetime.fromisoformat(raw.replace('Z','+00:00')).strftime('%d %b %Y')
+            return datetime.fromisoformat(raw.replace('Z', '+00:00')).strftime('%d %b %Y')
         except Exception:
             return '-'
 
-    pdf.section_title('5 MOST SILENT DEALS - NEEDS FOLLOW-UP')
-    pdf.tbl_header([('Deal', 70), ('Company', 55), ('Activity', 35), ('Close Date', 26)])
-    for i, (d, silence, company) in enumerate(data['silent_deals']):
-        p = d['properties']
-        pdf.tbl_row([
-            (p.get('dealname', '-'), 70),
-            (company if company != '-' else '-', 55),
-            (f'{silence}d silent', 35),
-            (pdf_close(d), 26),
-        ], shade=(i % 2 == 1))
+    # Calendar section
+    if calendar_days:
+        wl = _week_label()
+        pdf.section_title(f"SHWETA'S CALENDAR — {wl}")
+        for day_label, events in calendar_days:
+            pdf.ln(2)
+            pdf.set_font('Helvetica', 'B', 8)
+            pdf.set_text_color(15, 39, 68)
+            pdf.set_fill_color(240, 244, 248)
+            pdf.cell(0, 6, pdf_safe(day_label.upper()), fill=True,
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.tbl_header([('Meeting', 95), ('Time', 50), ('External Attendees', 41)])
+            for i, ev in enumerate(events):
+                attendees = ', '.join(ev['attendees']) if ev['attendees'] else '-'
+                title     = ev['title'] + (' [Meet]' if ev['meet'] else '')
+                pdf.tbl_row([
+                    (title, 95),
+                    (ev['time'].replace(' IST', ''), 50),
+                    (attendees, 41),
+                ], shade=(i % 2 == 1))
 
-    pdf.ln(4)
+    # Active deals
     page_guard()
-    pdf.section_title('5 MOST ACTIVE DEALS - RECENTLY ENGAGED')
+    pdf.section_title('10 MOST ACTIVE DEALS — RECENTLY ENGAGED')
     pdf.tbl_header([('Deal', 70), ('Company', 55), ('Activity', 35), ('Close Date', 26)])
     for i, (d, silence, company) in enumerate(data['active_deals']):
-        p = d['properties']
+        p  = d['properties']
+        co = '-' if _is_niroggyan(company) else (company or '-')
         pdf.tbl_row([
             (p.get('dealname', '-'), 70),
-            (company if company != '-' else '-', 55),
+            (co, 55),
             (f'active {silence}d ago', 35),
             (pdf_close(d), 26),
         ], shade=(i % 2 == 1))
@@ -1023,22 +961,10 @@ def format_pdf(data, ai_insight, apollo_data=None):
                 pdf.set_text_color(71, 85, 105)
                 pdf.multi_cell(0, 5, pdf_safe(f'    Agenda: {agenda}'))
 
-    pdf_meeting_table(f'MEETINGS TODAY — {data["date"]} ({stats["meetings_count"]})', data['meetings'])
-    pdf_meeting_table(f'MEETINGS TOMORROW — {data["tomorrow_date"]} ({len(data["meetings_tomorrow"])})', data['meetings_tomorrow'])
-
-    pdf.ln(4)
-    page_guard()
-    pdf.section_title(f'TOP 10 OPEN TICKETS ({stats["open_tickets_count"]} total)')
-    pdf.tbl_header([('Subject', 90), ('Company', 50), ('Priority', 26), ('Age', 20)])
-    for i, (t, company) in enumerate(data['open_tickets']):
-        p   = t['properties']
-        age = days_since(p.get('createdate'))
-        pdf.tbl_row([
-            (p.get('subject', '-'), 90),
-            (company, 50),
-            (p.get('hs_ticket_priority', '?'), 26),
-            (f'{age}d', 20),
-        ], shade=(i % 2 == 1))
+    pdf_meeting_table(f'HUBSPOT MEETINGS TODAY — {data["date"]} ({stats["meetings_count"]})',
+                      data['meetings'])
+    pdf_meeting_table(f'HUBSPOT MEETINGS TOMORROW — {data["tomorrow_date"]} ({len(data["meetings_tomorrow"])})',
+                      data['meetings_tomorrow'])
 
     if apollo_data:
         pdf.ln(4)
@@ -1082,38 +1008,16 @@ def format_pdf(data, ai_insight, apollo_data=None):
                         pdf.set_text_color(22, 101, 52)
                         pdf.multi_cell(0, 5, pdf_safe(f'    Replied: {names}'))
 
-    pdf.ln(4)
-    page_guard(60)
-    pdf.section_title('AI ANALYSIS — WARNING SIGNALS')
-    pdf.set_fill_color(248, 250, 255)
-    for line in ai_insight.strip().split('\n'):
-        s = line.strip()
-        if not s:
-            pdf.ln(3)
-            continue
-        if s.startswith('##'):
-            title = s.lstrip('#').strip()
-            pdf.ln(4)
-            pdf.set_font('Helvetica', 'B', 9)
-            pdf.set_text_color(15, 39, 68)
-            pdf.multi_cell(0, 6, pdf_safe(f'  {title.upper()}'), fill=True)
-        else:
-            s_clean = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
-            pdf.set_font('Helvetica', '', 9)
-            pdf.set_text_color(30, 58, 138)
-            pdf.multi_cell(0, 6, pdf_safe(f'  {s_clean}'), fill=True)
-        pdf.ln(1)
-
     return bytes(pdf.output())
 
 
 # ── Email ─────────────────────────────────────────────────────────────────────
 
 def send_email(subject, html_body, pdf_bytes, date_str):
-    msg             = MIMEMultipart('mixed')
-    msg['Subject']  = subject
-    msg['From']     = GMAIL_ADDRESS
-    msg['To']       = RECIPIENT_EMAIL
+    msg            = MIMEMultipart('mixed')
+    msg['Subject'] = subject
+    msg['From']    = GMAIL_ADDRESS
+    msg['To']      = RECIPIENT_EMAIL
 
     alt = MIMEMultipart('alternative')
     alt.attach(MIMEText(html_body, 'html'))
@@ -1134,26 +1038,29 @@ def send_email(subject, html_body, pdf_bytes, date_str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    print('Fetching Google Calendar (week)...')
+    calendar_days = fetch_calendar_week()
+    print(f'Got {sum(len(e) for _, e in calendar_days)} calendar events across {len(calendar_days)} days\n')
+
     print('Fetching HubSpot data...')
-    companies, deals, tickets, meetings_today, meetings_tomorrow, ticket_company_map, deal_company_map, meeting_company_map, meeting_phone_map, meeting_stage_map = get_data()
+    (companies, deals, meetings_today, meetings_tomorrow,
+     deal_company_map, meeting_company_map,
+     meeting_phone_map, meeting_stage_map) = get_data()
 
     print('Building report data...')
-    data = build_report_data(companies, deals, tickets, meetings_today, meetings_tomorrow,
-                             ticket_company_map, deal_company_map, meeting_company_map,
-                             meeting_phone_map, meeting_stage_map)
-
-    print('Building AI context...')
-    ai_context = build_ai_context(data, ticket_company_map, deal_company_map, meeting_company_map)
-
-    print('Getting AI analysis...')
-    insight = get_ai_insight(ai_context)
+    data = build_report_data(
+        companies, deals, meetings_today, meetings_tomorrow,
+        deal_company_map, meeting_company_map,
+        meeting_phone_map, meeting_stage_map,
+        calendar_days
+    )
 
     print('Fetching Apollo sequence analytics...')
     apollo_data = get_apollo_data()
 
     print('Generating HTML and PDF...')
-    html = format_html(data, insight, apollo_data)
-    pdf  = format_pdf(data, insight, apollo_data)
+    html = format_html(data, calendar_days, apollo_data)
+    pdf  = format_pdf(data, calendar_days, apollo_data)
 
     print('Sending email...')
     send_email(f"NirogGyan Daily Pulse - {data['date']}", html, pdf, data['date'])

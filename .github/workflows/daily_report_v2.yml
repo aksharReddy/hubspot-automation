@@ -16,14 +16,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests fpdf2
+        run: pip install requests fpdf2 google-auth google-api-python-client
 
       - name: Run daily report v2
         env:
-          HUBSPOT_TOKEN:      ${{ secrets.HUBSPOT_TOKEN }}
-          GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
-          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          RECIPIENT_EMAIL:    ${{ secrets.RECIPIENT_EMAIL }}
-          APOLLO_API_KEY:     ${{ secrets.APOLLO_API_KEY }}
+          HUBSPOT_TOKEN:              ${{ secrets.HUBSPOT_TOKEN }}
+          GMAIL_ADDRESS:              ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD:         ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL:            ${{ secrets.RECIPIENT_EMAIL }}
+          APOLLO_API_KEY:             ${{ secrets.APOLLO_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python scripts/daily_report_v2.py
