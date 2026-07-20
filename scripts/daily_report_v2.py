@@ -33,6 +33,7 @@ APOLLO_API_KEY     = os.environ['APOLLO_API_KEY']
 GOOGLE_SA_JSON     = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON'])
 CLICKUP_TOKEN      = os.environ['CLICKUP_TOKEN']
 CLICKUP_LIST_ID    = '901615411023'
+GROQ_API_KEY       = os.environ['GROQ_API_KEY']
 
 HUBSPOT_HEADERS = {'Authorization': f'Bearer {HUBSPOT_TOKEN}'}
 APOLLO_BASE    = 'https://api.apollo.io/api/v1'
@@ -176,6 +177,88 @@ def parse_meeting_time(ts_val):
         return ist.strftime('%I:%M %p')
     except Exception:
         return '-'
+
+
+def call_groq(prompt, max_tokens=400):
+    try:
+        r = requests.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            headers={'Authorization': f'Bearer {GROQ_API_KEY}', 'Content-Type': 'application/json'},
+            json={
+                'model': 'llama-3.3-70b-versatile',
+                'messages': [{'role': 'user', 'content': prompt}],
+                'max_tokens': max_tokens,
+            },
+            timeout=30
+        )
+        return r.json()['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        return f'AI unavailable: {e}'
+
+
+def build_ai_briefing(data, clickup_tickets, calendar_days):
+    lines = [
+        f"You are writing a daily morning briefing for the leadership team at NirogGyan, a B2B healthcare SaaS in India.",
+        f"Today is {data['date']}. Here is a structured data dump from their internal systems.\n",
+    ]
+
+    # ClickUp
+    if clickup_tickets:
+        overdue = [t for t in clickup_tickets if t['overdue']]
+        urgent_due_soon = [t for t in clickup_tickets if not t['overdue'] and t['days_left'] is not None and t['days_left'] <= 5 and t['priority'] == 'URGENT']
+        lines.append(f"SUPPORT TICKETS ({len(clickup_tickets)} open):")
+        if overdue:
+            for t in overdue:
+                lines.append(f"  - OVERDUE {abs(t['days_left'])}d: {t['name']} (assigned: {t['assignees']})")
+        if urgent_due_soon:
+            for t in urgent_due_soon:
+                lines.append(f"  - URGENT due in {t['days_left']}d: {t['name']} (assigned: {t['assignees']})")
+        no_due = [t for t in clickup_tickets if not t['due_str']]
+        if no_due:
+            lines.append(f"  - {len(no_due)} tickets have no due date set")
+        lines.append('')
+
+    # Calendar
+    today_cal = next(((d, evts) for d, evts in calendar_days if d == TODAY_LABEL), None)
+    if today_cal:
+        _, evts = today_cal
+        lines.append(f"TODAY'S CALENDAR ({len(evts)} meetings):")
+        for ev in evts:
+            attendee_str = ', '.join(ev['attendees']) if ev['attendees'] else 'internal'
+            lines.append(f"  - {ev['time']}: {ev['title']} (with {attendee_str})")
+        lines.append('')
+
+    # HubSpot meetings today
+    today_hs = next(((d, m) for d, m in data['hs_meetings_by_day'] if d == TODAY_LABEL), None)
+    if today_hs:
+        _, meetings = today_hs
+        lines.append(f"HUBSPOT MEETINGS TODAY ({len(meetings)}):")
+        for m, company, phone, *_ in meetings:
+            title = m['properties'].get('hs_meeting_title', 'Meeting')
+            lines.append(f"  - {title} with {company} (phone: {phone})")
+        lines.append('')
+
+    # Deals
+    if data['active_deals']:
+        lines.append(f"PIPELINE: {data['stats']['open_deals_count']} open deals total. Most recently active:")
+        for d, silence, company in data['active_deals'][:4]:
+            lines.append(f"  - {d['properties'].get('dealname','-')} ({company}, active {silence}d ago)")
+        lines.append('')
+
+    # Active companies
+    lines.append(f"ACTIVE COMPANIES THIS MONTH: {data['stats']['active_count']} companies engaged recently.")
+
+    lines += [
+        "",
+        "INSTRUCTIONS:",
+        "Write 4-6 short bullet points (use •) for a morning briefing. Each bullet should be 1-2 sentences max.",
+        "Focus on: what needs immediate action, risks, today's key meetings, patterns you see across the data.",
+        "Do NOT just list what's in the data — interpret it. Flag what's worrying, what's good, what needs follow-up.",
+        "Be direct and specific. Use names, numbers, dates. No filler words. No intro sentence.",
+        "Plain text only, no markdown, no bold, no headers.",
+    ]
+
+    return call_groq('\n'.join(lines), max_tokens=450)
 
 
 def fetch_calendar_week():
@@ -558,6 +641,30 @@ def get_apollo_data():
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
 
+def _ai_briefing_html(briefing):
+    if not briefing or briefing.startswith('AI unavailable'):
+        return ''
+    bullet_html = ''
+    for line in briefing.strip().split('\n'):
+        line = line.strip().lstrip('•-').strip()
+        if not line:
+            continue
+        bullet_html += (
+            f'<div style="display:flex;align-items:flex-start;margin-bottom:10px;">'
+            f'<span style="color:#f59e0b;font-size:16px;line-height:1;margin-right:10px;margin-top:1px;">&#9679;</span>'
+            f'<span style="font-size:13px;color:#1e3a5f;line-height:1.6;">{line}</span>'
+            f'</div>'
+        )
+    return f'''
+  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+  <tr><td style="background:#fff;padding:20px 32px;">
+    <div style="background:linear-gradient(135deg,#0f2744,#1a3a6b);border-radius:10px;padding:20px 24px;">
+      <div style="font-size:11px;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px;">&#9733; AI Morning Briefing</div>
+      {bullet_html}
+    </div>
+  </td></tr>'''
+
+
 def _day_header_style(day_label, is_today):
     if is_today:
         return ('background:#1a56a0;color:#ffffff;',
@@ -820,7 +927,7 @@ def _apollo_html(apollo_data):
   </td></tr>'''
 
 
-def format_html(data, calendar_days, clickup_tickets=None, apollo_data=None):
+def format_html(data, calendar_days, ai_briefing='', clickup_tickets=None, apollo_data=None):
     stats = data['stats']
 
     def badge(text, color):
@@ -909,6 +1016,8 @@ def format_html(data, calendar_days, clickup_tickets=None, apollo_data=None):
       </td>
     </tr></table>
   </td></tr>
+
+  {_ai_briefing_html(ai_briefing)}
 
   {_calendar_html(calendar_days)}
 
@@ -1010,7 +1119,7 @@ class PulsePDF(FPDF):
                   fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 
-def format_pdf(data, calendar_days, clickup_tickets=None, apollo_data=None):
+def format_pdf(data, calendar_days, ai_briefing='', clickup_tickets=None, apollo_data=None):
     stats = data['stats']
 
     pdf = PulsePDF()
@@ -1032,6 +1141,25 @@ def format_pdf(data, calendar_days, clickup_tickets=None, apollo_data=None):
                        ('Active This Month', stats['active_count'])]:
         pdf.cell(46, 12, pdf_safe(f'{val}  {label}'), fill=True, align='C')
     pdf.ln(16)
+
+    # AI briefing box
+    if ai_briefing and not ai_briefing.startswith('AI unavailable'):
+        W = pdf.w - pdf.l_margin - pdf.r_margin
+        pdf.set_fill_color(15, 39, 68)
+        pdf.set_font('Helvetica', 'B', 8)
+        pdf.set_text_color(245, 158, 11)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(W, 7, '  * AI MORNING BRIEFING', fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_fill_color(26, 58, 107)
+        pdf.set_font('Helvetica', '', 9)
+        pdf.set_text_color(220, 235, 255)
+        for line in ai_briefing.strip().split('\n'):
+            line = line.strip().lstrip('•-').strip()
+            if not line:
+                continue
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(W, 6, pdf_safe(f'  • {line}'), fill=True)
+        pdf.ln(6)
 
     def page_guard(min_mm=40):
         if pdf.h - pdf.b_margin - pdf.get_y() < min_mm:
@@ -1245,10 +1373,14 @@ if __name__ == '__main__':
     print('Fetching Apollo sequence analytics...')
     apollo_data = get_apollo_data()
 
+    print('Generating AI briefing...')
+    ai_briefing = build_ai_briefing(data, clickup_tickets, calendar_days)
+    print(f'AI briefing: {ai_briefing[:80]}...\n')
+
     print('Generating HTML and PDF...')
     date_str = data['date']
-    html = format_html(data, calendar_days, clickup_tickets, apollo_data)
-    pdf  = format_pdf(data, calendar_days, clickup_tickets, apollo_data)
+    html = format_html(data, calendar_days, ai_briefing=ai_briefing, clickup_tickets=clickup_tickets, apollo_data=apollo_data)
+    pdf  = format_pdf(data, calendar_days, ai_briefing=ai_briefing, clickup_tickets=clickup_tickets, apollo_data=apollo_data)
 
     print('Sending email...')
     send_email(f"NirogGyan Daily Pulse - {date_str}", html, pdf, date_str)

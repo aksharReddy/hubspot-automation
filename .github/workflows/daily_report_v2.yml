@@ -16,7 +16,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests fpdf2 google-auth google-api-python-client
+        run: pip install requests fpdf2 google-auth google-api-python-client groq
 
       - name: Run daily report v2
         env:
@@ -27,4 +27,5 @@ jobs:
           APOLLO_API_KEY:             ${{ secrets.APOLLO_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           CLICKUP_TOKEN:               ${{ secrets.CLICKUP_TOKEN }}
+          GROQ_API_KEY:                ${{ secrets.GROQ_API_KEY }}
         run: python scripts/daily_report_v2.py
