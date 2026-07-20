@@ -26,4 +26,5 @@ jobs:
           RECIPIENT_EMAIL:            ${{ secrets.RECIPIENT_EMAIL }}
           APOLLO_API_KEY:             ${{ secrets.APOLLO_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLICKUP_TOKEN:               ${{ secrets.CLICKUP_TOKEN }}
         run: python scripts/daily_report_v2.py

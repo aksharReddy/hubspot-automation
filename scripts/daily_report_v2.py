@@ -31,6 +31,8 @@ GMAIL_APP_PASSWORD = os.environ['GMAIL_APP_PASSWORD']
 RECIPIENT_EMAIL    = os.environ['RECIPIENT_EMAIL']
 APOLLO_API_KEY     = os.environ['APOLLO_API_KEY']
 GOOGLE_SA_JSON     = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON'])
+CLICKUP_TOKEN      = os.environ['CLICKUP_TOKEN']
+CLICKUP_LIST_ID    = '901615411023'
 
 HUBSPOT_HEADERS = {'Authorization': f'Bearer {HUBSPOT_TOKEN}'}
 APOLLO_BASE    = 'https://api.apollo.io/api/v1'
@@ -231,6 +233,53 @@ def fetch_calendar_week():
 def _week_label():
     saturday = WEEK_START + timedelta(days=5)
     return f'{WEEK_START.strftime("%d %b")} - {saturday.strftime("%d %b %Y")}'
+
+
+def fetch_clickup_tickets():
+    try:
+        r = requests.get(
+            f'https://api.clickup.com/api/v2/list/{CLICKUP_LIST_ID}/task',
+            headers={'Authorization': CLICKUP_TOKEN},
+            params={'include_closed': 'false', 'subtasks': 'true'},
+            timeout=15
+        )
+        if r.status_code != 200:
+            return []
+        tasks = r.json().get('tasks', [])
+        result = []
+        for t in tasks:
+            due_ms    = t.get('due_date')
+            due_str   = ''
+            overdue   = False
+            days_left = None
+            if due_ms:
+                due_dt    = datetime.fromtimestamp(int(due_ms) / 1000, tz=timezone.utc)
+                days_left = (due_dt - NOW).days
+                overdue   = days_left < 0
+                due_str   = due_dt.strftime('%d %b %Y')
+            assignees = ', '.join(a['username'] for a in t.get('assignees', [])) or 'Unassigned'
+            priority  = (t.get('priority') or {}).get('priority', '') or ''
+            result.append({
+                'name':      t['name'],
+                'status':    t['status']['status'],
+                'priority':  priority.upper(),
+                'due_str':   due_str,
+                'days_left': days_left,
+                'overdue':   overdue,
+                'assignees': assignees,
+            })
+        # Sort: overdue first (oldest first), then by due date asc, then no-due-date
+        def sort_key(t):
+            if t['overdue']:
+                return (0, t['days_left'])
+            if t['days_left'] is not None:
+                return (1, t['days_left'])
+            return (2, 0)
+        result.sort(key=sort_key)
+        return result
+    except Exception as ex:
+        print(f'ClickUp fetch failed: {ex}')
+        return []
 
 
 def get_data():
@@ -624,6 +673,82 @@ def _hs_meetings_html(hs_meetings_by_day, date_str):
   </td></tr>'''
 
 
+def _clickup_html(tickets):
+    if not tickets:
+        return ''
+    overdue_count = sum(1 for t in tickets if t['overdue'])
+    rows = ''
+    for t in tickets:
+        # Status badge
+        if t['status'].lower() == 'in progress':
+            st_bg, st_fg = '#dbeafe', '#1d4ed8'
+        else:
+            st_bg, st_fg = '#f1f5f9', '#475569'
+        st_badge = (f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+                    f'background:{st_bg};color:{st_fg};font-size:10px;font-weight:700;">'
+                    f'{t["status"].upper()}</span>')
+
+        # Priority badge
+        pri_badge = ''
+        if t['priority'] == 'URGENT':
+            pri_badge = ('<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+                         'background:#fee2e2;color:#b91c1c;font-size:10px;font-weight:700;margin-left:4px;">URGENT</span>')
+        elif t['priority'] == 'HIGH':
+            pri_badge = ('<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+                         'background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;margin-left:4px;">HIGH</span>')
+        elif t['priority'] == 'NORMAL':
+            pri_badge = ('<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+                         'background:#f1f5f9;color:#475569;font-size:10px;font-weight:700;margin-left:4px;">NORMAL</span>')
+
+        # Due date
+        if not t['due_str']:
+            due_html = '<span style="color:#94a3b8;font-size:11px;">No due date</span>'
+        elif t['overdue']:
+            due_html = (f'<span style="color:#b91c1c;font-weight:700;font-size:11px;">'
+                        f'{t["due_str"]} &nbsp;&#9888; {abs(t["days_left"])}d overdue</span>')
+        elif t['days_left'] == 0:
+            due_html = f'<span style="color:#d97706;font-weight:700;font-size:11px;">{t["due_str"]} &nbsp;&#9888; Today</span>'
+        elif t['days_left'] <= 3:
+            due_html = f'<span style="color:#d97706;font-size:11px;">{t["due_str"]} ({t["days_left"]}d)</span>'
+        else:
+            due_html = f'<span style="color:#64748b;font-size:11px;">{t["due_str"]} ({t["days_left"]}d)</span>'
+
+        row_bg = '#fff5f5' if t['overdue'] else '#ffffff'
+        rows += (
+            f'<tr style="background:{row_bg};">'
+            f'<td style="padding:8px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#1e293b;">'
+            f'{t["name"]}</td>'
+            f'<td style="padding:8px 14px;border-bottom:1px solid #f1f5f9;white-space:nowrap;">'
+            f'{st_badge}{pri_badge}</td>'
+            f'<td style="padding:8px 14px;border-bottom:1px solid #f1f5f9;">{due_html}</td>'
+            f'<td style="padding:8px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;">'
+            f'{t["assignees"]}</td>'
+            f'</tr>'
+        )
+
+    overdue_note = ''
+    if overdue_count:
+        overdue_note = (f' &nbsp;<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
+                        f'background:#fee2e2;color:#b91c1c;font-size:11px;font-weight:700;">'
+                        f'{overdue_count} overdue</span>')
+
+    return f'''
+  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+  <tr><td style="background:#fff;padding:24px 32px;">
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">
+      &#9632; Customer Support — Active Tickets ({len(tickets)}){overdue_note}
+    </div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #fecaca;border-radius:8px;overflow:hidden;">
+      <tr style="background:#fef2f2;">
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Task</th>
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Status / Priority</th>
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Due Date</th>
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Assignee(s)</th>
+      </tr>{rows}
+    </table>
+  </td></tr>'''
+
+
 def _apollo_html(apollo_data):
     if not apollo_data:
         return ''
@@ -696,7 +821,7 @@ def _apollo_html(apollo_data):
   </td></tr>'''
 
 
-def format_html(data, calendar_days, apollo_data=None):
+def format_html(data, calendar_days, clickup_tickets=None, apollo_data=None):
     stats = data['stats']
 
     def badge(text, color):
@@ -813,6 +938,8 @@ def format_html(data, calendar_days, apollo_data=None):
     </table>
   </td></tr>
 
+  {_clickup_html(clickup_tickets or [])}
+
   {_apollo_html(apollo_data)}
 
   <tr><td style="background:#0f2744;border-radius:0 0 12px 12px;padding:16px 32px;text-align:center;">
@@ -884,7 +1011,7 @@ class PulsePDF(FPDF):
                   fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 
-def format_pdf(data, calendar_days, apollo_data=None):
+def format_pdf(data, calendar_days, clickup_tickets=None, apollo_data=None):
     stats = data['stats']
 
     pdf = PulsePDF()
@@ -999,6 +1126,30 @@ def format_pdf(data, calendar_days, apollo_data=None):
             (stage, 28),
         ], shade=(i % 2 == 1))
 
+    if clickup_tickets:
+        pdf.ln(4)
+        page_guard()
+        overdue_count = sum(1 for t in clickup_tickets if t['overdue'])
+        title = f'CUSTOMER SUPPORT — ACTIVE TICKETS ({len(clickup_tickets)})'
+        if overdue_count:
+            title += f'  [{overdue_count} OVERDUE]'
+        pdf.section_title(title)
+        pdf.tbl_header([('Task', 90), ('Status', 24), ('Priority', 22), ('Due Date', 28), ('Assignee(s)', 22)])
+        for i, t in enumerate(clickup_tickets):
+            if not t['due_str']:
+                due_label = 'No date'
+            elif t['overdue']:
+                due_label = f'{t["due_str"]} OVR'
+            else:
+                due_label = t['due_str']
+            pdf.tbl_row([
+                (t['name'], 90),
+                (t['status'].upper(), 24),
+                (t['priority'] or '-', 22),
+                (due_label, 28),
+                (t['assignees'], 22),
+            ], shade=(i % 2 == 1))
+
     if apollo_data:
         pdf.ln(4)
         page_guard(40)
@@ -1088,13 +1239,17 @@ if __name__ == '__main__':
         calendar_days
     )
 
+    print('Fetching ClickUp active tickets...')
+    clickup_tickets = fetch_clickup_tickets()
+    print(f'Got {len(clickup_tickets)} tickets\n')
+
     print('Fetching Apollo sequence analytics...')
     apollo_data = get_apollo_data()
 
     print('Generating HTML and PDF...')
     date_str = data['date']
-    html = format_html(data, calendar_days, apollo_data)
-    pdf  = format_pdf(data, calendar_days, apollo_data)
+    html = format_html(data, calendar_days, clickup_tickets, apollo_data)
+    pdf  = format_pdf(data, calendar_days, clickup_tickets, apollo_data)
 
     print('Sending email...')
     send_email(f"NirogGyan Daily Pulse - {date_str}", html, pdf, date_str)
