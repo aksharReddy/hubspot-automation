@@ -46,10 +46,14 @@ APOLLO_REPLY_CLASSES = [
 BASE = 'https://api.hubapi.com'
 NOW  = datetime.now(timezone.utc)
 IST  = timezone(timedelta(hours=5, minutes=30))
-TODAY_START    = NOW.replace(hour=0,  minute=0,  second=0,  microsecond=0)
-TODAY_END      = NOW.replace(hour=23, minute=59, second=59, microsecond=999999)
-TOMORROW_START = TODAY_START + timedelta(days=1)
-TOMORROW_END   = TODAY_END   + timedelta(days=1)
+
+_today_ist  = NOW.astimezone(IST)
+_monday_ist = _today_ist - timedelta(days=_today_ist.weekday())
+WEEK_START  = _monday_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+WEEK_END    = WEEK_START + timedelta(days=6)   # Sunday 00:00 IST — Saturday is last day shown
+TODAY_LABEL = _today_ist.strftime('%A, %d %b')
+
+EXCLUDED_TITLES = {'niro scrum call', 'weekend update and sprint planning'}
 
 
 def days_since(date_str):
@@ -73,6 +77,10 @@ def deal_silence(d):
 
 def _is_niroggyan(name):
     return 'niroggyan' in (name or '').lower()
+
+
+def _is_excluded(title):
+    return (title or '').lower().strip() in EXCLUDED_TITLES
 
 
 def fetch_all(obj, props):
@@ -124,7 +132,7 @@ def fetch_meetings(start_dt, end_dt):
             'properties': ['hs_meeting_title', 'hs_meeting_start_time',
                            'hs_meeting_end_time', 'hs_meeting_body', 'hs_meeting_source'],
             'sorts': [{'propertyName': 'hs_meeting_start_time', 'direction': 'ASCENDING'}],
-            'limit': 50
+            'limit': 100
         }
     )
     return r.json().get('results', []) if r.status_code == 200 else []
@@ -137,7 +145,7 @@ def parse_agenda(body):
     if m:
         text = m.group(1).strip()
         if text and len(text) > 3:
-            return text[:250]
+            return text[:200]
     return ''
 
 
@@ -162,7 +170,7 @@ def parse_meeting_time(ts_val):
         return '-'
     try:
         dt  = datetime.fromisoformat(str(ts_val).replace('Z', '+00:00'))
-        ist = dt + timedelta(hours=5, minutes=30)
+        ist = dt.astimezone(IST)
         return ist.strftime('%I:%M %p')
     except Exception:
         return '-'
@@ -170,18 +178,13 @@ def parse_meeting_time(ts_val):
 
 def fetch_calendar_week():
     try:
-        today_ist  = NOW.astimezone(IST)
-        monday_ist = today_ist - timedelta(days=today_ist.weekday())
-        week_start = monday_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end   = week_start + timedelta(days=5)  # Saturday 00:00
-
         creds  = service_account.Credentials.from_service_account_info(
             GOOGLE_SA_JSON, scopes=['https://www.googleapis.com/auth/calendar.readonly'])
         svc    = gcal_build('calendar', 'v3', credentials=creds, cache_discovery=False)
         result = svc.events().list(
             calendarId='Shweta@niroggyan.com',
-            timeMin=week_start.isoformat(),
-            timeMax=week_end.isoformat(),
+            timeMin=WEEK_START.isoformat(),
+            timeMax=WEEK_END.isoformat(),
             singleEvents=True,
             orderBy='startTime',
         ).execute()
@@ -189,6 +192,10 @@ def fetch_calendar_week():
         days      = {}
         day_order = []
         for e in result.get('items', []):
+            title = e.get('summary', '')
+            if _is_excluded(title):
+                continue
+
             start_raw = e['start'].get('dateTime', e['start'].get('date'))
             if 'T' in start_raw:
                 dt      = datetime.fromisoformat(start_raw).astimezone(IST)
@@ -209,7 +216,7 @@ def fetch_calendar_week():
                 if not a.get('self') and 'niroggyan' not in a['email'].lower()
             ]
             days[day_key].append({
-                'title':     e.get('summary', '(No title)'),
+                'title':     title or '(No title)',
                 'time':      time_str,
                 'attendees': attendees,
                 'meet':      e.get('hangoutLink', ''),
@@ -222,10 +229,8 @@ def fetch_calendar_week():
 
 
 def _week_label():
-    today_ist  = NOW.astimezone(IST)
-    monday_ist = today_ist - timedelta(days=today_ist.weekday())
-    friday_ist = monday_ist + timedelta(days=4)
-    return f'{monday_ist.strftime("%d %b")} – {friday_ist.strftime("%d %b %Y")}'
+    saturday = WEEK_START + timedelta(days=5)
+    return f'{WEEK_START.strftime("%d %b")} - {saturday.strftime("%d %b %Y")}'
 
 
 def get_data():
@@ -239,10 +244,11 @@ def get_data():
         'notes_last_updated', 'notes_last_contacted', 'hs_lastmodifieddate',
         'hs_is_closed', 'hs_is_closed_won'
     ])
-    meetings_today    = fetch_meetings(TODAY_START, TODAY_END)
-    meetings_tomorrow = fetch_meetings(TOMORROW_START, TOMORROW_END)
-    all_meetings      = meetings_today + meetings_tomorrow
-    company_by_id     = {c['id']: c for c in companies}
+    meetings_week = fetch_meetings(
+        WEEK_START.astimezone(timezone.utc),
+        WEEK_END.astimezone(timezone.utc)
+    )
+    company_by_id = {c['id']: c for c in companies}
 
     def build_name_map(from_obj, to_obj, ids):
         name_map = {}
@@ -258,12 +264,12 @@ def get_data():
         return name_map
 
     deal_company_map    = build_name_map('deals',    'companies', [d['id'] for d in deals])
-    meeting_company_map = build_name_map('meetings', 'companies', [m['id'] for m in all_meetings])
+    meeting_company_map = build_name_map('meetings', 'companies', [m['id'] for m in meetings_week])
 
     meeting_phone_map = {}
     meeting_stage_map = {}
-    if all_meetings:
-        mid_list      = [m['id'] for m in all_meetings]
+    if meetings_week:
+        mid_list      = [m['id'] for m in meetings_week]
         contact_assoc = fetch_associations_batch('meetings', 'contacts', mid_list)
         contact_ids   = list({cid for cids in contact_assoc.values() for cid in cids})
         if contact_ids:
@@ -296,7 +302,7 @@ def get_data():
                             meeting_stage_map[mid] = info['stage']
                         break
 
-    for m in all_meetings:
+    for m in meetings_week:
         mid = m['id']
         if meeting_phone_map.get(mid, 'Not on record') == 'Not on record':
             body  = m['properties'].get('hs_meeting_body') or ''
@@ -304,11 +310,11 @@ def get_data():
             if match:
                 meeting_phone_map[mid] = match.group(1).strip()
 
-    return (companies, deals, meetings_today, meetings_tomorrow,
+    return (companies, deals, meetings_week,
             deal_company_map, meeting_company_map, meeting_phone_map, meeting_stage_map)
 
 
-def build_report_data(companies, deals, meetings_today, meetings_tomorrow,
+def build_report_data(companies, deals, meetings_week,
                       deal_company_map, meeting_company_map, meeting_phone_map,
                       meeting_stage_map, calendar_days):
     open_deals   = [d for d in deals
@@ -324,43 +330,51 @@ def build_report_data(companies, deals, meetings_today, meetings_tomorrow,
                         key=lambda c: days_since(c['properties'].get('notes_last_contacted')
                                                  or c['properties'].get('notes_last_updated')))[:10]
 
-    def meeting_ts(m):
-        try:
-            return int(m['properties'].get('hs_meeting_start_time') or 0)
-        except Exception:
-            return 0
-
-    meetings_sorted          = sorted(meetings_today,    key=meeting_ts)
-    meetings_tomorrow_sorted = sorted(meetings_tomorrow, key=meeting_ts)
     _stage_map = meeting_stage_map or {}
 
-    def meeting_tuples(lst):
-        rows = []
-        for m in lst:
-            mid     = m['id']
-            company = meeting_company_map.get(mid, '-')
-            if _is_niroggyan(company):
-                company = '-'
-            phone   = meeting_phone_map.get(mid, '-')
-            agenda  = parse_agenda(m['properties'].get('hs_meeting_body', ''))
-            stage   = format_lifecycle(_stage_map.get(mid, ''))
-            source  = format_meeting_source(m['properties'].get('hs_meeting_source'))
-            rows.append((m, company, phone, agenda, stage, source))
-        return rows
+    # Group HubSpot meetings by IST day, filter excluded titles
+    hs_days      = {}
+    hs_day_order = []
+    for m in meetings_week:
+        title = m['properties'].get('hs_meeting_title', '')
+        if _is_excluded(title):
+            continue
+        ts = m['properties'].get('hs_meeting_start_time')
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00')).astimezone(IST)
+        except Exception:
+            continue
+        day_key = dt.strftime('%A, %d %b')
+        if day_key not in hs_days:
+            hs_days[day_key] = []
+            hs_day_order.append(day_key)
+        mid     = m['id']
+        company = meeting_company_map.get(mid, '-')
+        if _is_niroggyan(company):
+            company = '-'
+        phone   = meeting_phone_map.get(mid, '-')
+        agenda  = parse_agenda(m['properties'].get('hs_meeting_body', ''))
+        stage   = format_lifecycle(_stage_map.get(mid, ''))
+        source  = format_meeting_source(m['properties'].get('hs_meeting_source'))
+        hs_days[day_key].append((m, company, phone, agenda, stage, source))
 
-    week_meetings_count = sum(len(evts) for _, evts in calendar_days)
+    hs_meetings_by_day = [(day, hs_days[day]) for day in hs_day_order]
+
+    today_hs       = next((evts for day, evts in hs_meetings_by_day if day == TODAY_LABEL), [])
+    meetings_count = len(today_hs)
+    week_meetings  = sum(len(evts) for _, evts in calendar_days)
 
     return {
-        'date':              NOW.strftime('%d %B %Y'),
-        'tomorrow_date':     (NOW + timedelta(days=1)).strftime('%d %B %Y'),
+        'date':              _today_ist.strftime('%d %B %Y'),
         'active_deals':      [(d, deal_silence(d), deal_company_map.get(d['id'], '-')) for d in active_deals],
-        'meetings':          meeting_tuples(meetings_sorted),
-        'meetings_tomorrow': meeting_tuples(meetings_tomorrow_sorted),
+        'hs_meetings_by_day': hs_meetings_by_day,
         'active_companies':  active_cos,
         'stats': {
             'open_deals_count':    len(open_deals),
-            'week_meetings_count': week_meetings_count,
-            'meetings_count':      len(meetings_today),
+            'week_meetings_count': week_meetings,
+            'meetings_count':      meetings_count,
             'active_count':        len(active_cos),
         }
     }
@@ -494,7 +508,15 @@ def get_apollo_data():
                  'steps': [], 'total_replied': 0}]
 
 
-# ── HTML ──────────────────────────────────────────────────────────────────────
+# ── HTML helpers ──────────────────────────────────────────────────────────────
+
+def _day_header_style(day_label, is_today):
+    if is_today:
+        return ('background:#1a56a0;color:#ffffff;',
+                ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;'
+                'background:#fbbf24;color:#1a1a1a;font-size:10px;font-weight:700;margin-left:6px;">TODAY</span>')
+    return 'background:#f8fafc;color:#0f2744;', ''
+
 
 def _calendar_html(calendar_days):
     if not calendar_days:
@@ -504,22 +526,25 @@ def _calendar_html(calendar_days):
 
     rows = ''
     for day_label, events in calendar_days:
+        is_today  = (day_label == TODAY_LABEL)
+        hdr_style, today_tag = _day_header_style(day_label, is_today)
         rows += (
-            f'<tr><td colspan="3" style="padding:8px 14px 4px;font-size:11px;font-weight:700;'
-            f'color:#0f2744;text-transform:uppercase;letter-spacing:0.5px;'
-            f'background:#f8fafc;border-top:2px solid #e2e8f0;">{day_label}</td></tr>'
+            f'<tr><td colspan="3" style="padding:7px 14px 5px;font-size:11px;font-weight:700;'
+            f'text-transform:uppercase;letter-spacing:0.5px;border-top:2px solid #e2e8f0;{hdr_style}">'
+            f'{day_label}{today_tag}</td></tr>'
         )
         for ev in events:
             attendee_str = ', '.join(ev['attendees']) if ev['attendees'] else '—'
             meet_badge   = ''
             if ev['meet']:
-                meet_badge = (' <span style="display:inline-block;padding:1px 6px;border-radius:8px;'
+                meet_badge = (' <span style="display:inline-block;padding:1px 5px;border-radius:6px;'
                               'background:#dbeafe;color:#1d4ed8;font-size:10px;font-weight:700;">Meet</span>')
+            bg = '#f0f6ff' if is_today else '#ffffff'
             rows += (
-                f'<tr>'
-                f'<td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-size:13px;color:#1e293b;">{ev["title"]}{meet_badge}</td>'
-                f'<td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#64748b;white-space:nowrap;">{ev["time"]}</td>'
-                f'<td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;">{attendee_str}</td>'
+                f'<tr style="background:{bg};">'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#1e293b;">{ev["title"]}{meet_badge}</td>'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;white-space:nowrap;">{ev["time"]}</td>'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;">{attendee_str}</td>'
                 f'</tr>'
             )
 
@@ -529,10 +554,72 @@ def _calendar_html(calendar_days):
     <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#128197; Shweta\'s Calendar &mdash; {wl} ({total} meetings)</div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
       <tr style="background:#f8fafc;">
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Meeting</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Time (IST)</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">External Attendees</th>
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Meeting</th>
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Time (IST)</th>
+        <th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">External Attendees</th>
       </tr>{rows}
+    </table>
+  </td></tr>'''
+
+
+def _hs_meetings_html(hs_meetings_by_day, date_str):
+    if not hs_meetings_by_day:
+        return ''
+    wl    = _week_label()
+    total = sum(len(evts) for _, evts in hs_meetings_by_day)
+
+    meeting_th = (
+        '<th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Title</th>'
+        '<th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>'
+        '<th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Time</th>'
+        '<th style="padding:7px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Phone</th>'
+    )
+
+    rows = ''
+    for day_label, meetings in hs_meetings_by_day:
+        is_today  = (day_label == TODAY_LABEL)
+        hdr_style, today_tag = _day_header_style(day_label, is_today)
+        rows += (
+            f'<tr><td colspan="4" style="padding:7px 14px 5px;font-size:11px;font-weight:700;'
+            f'text-transform:uppercase;letter-spacing:0.5px;border-top:2px solid #e2e8f0;{hdr_style}">'
+            f'{day_label}{today_tag}</td></tr>'
+        )
+        for m, company, phone, agenda, stage, source in meetings:
+            p        = m['properties']
+            title    = p.get('hs_meeting_title', 'Meeting')
+            time_str = parse_meeting_time(p.get('hs_meeting_start_time'))
+            badges   = ''
+            if stage:
+                badges += (f'<span style="display:inline-block;padding:1px 6px;border-radius:8px;'
+                           f'background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;'
+                           f'margin-left:5px;">{stage}</span>')
+            if source:
+                clr = ('#dcfce7', '#166534') if source == 'Inbound' else ('#f1f5f9', '#475569')
+                badges += (f'<span style="display:inline-block;padding:1px 6px;border-radius:8px;'
+                           f'background:{clr[0]};color:{clr[1]};font-size:10px;font-weight:700;'
+                           f'margin-left:4px;">{source}</span>')
+            bg = '#f0f6ff' if is_today else '#ffffff'
+            rows += (
+                f'<tr style="background:{bg};">'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#1e293b;">{title}{badges}</td>'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;">{company}</td>'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:11px;color:#64748b;white-space:nowrap;">{time_str} IST</td>'
+                f'<td style="padding:5px 14px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#1e293b;font-weight:500;">{phone}</td>'
+                f'</tr>'
+            )
+            if agenda:
+                rows += (
+                    f'<tr style="background:{bg};"><td colspan="4" style="padding:2px 14px 6px 20px;'
+                    f'border-bottom:1px solid #f1f5f9;font-size:11px;color:#475569;font-style:italic;">'
+                    f'Agenda: {agenda}</td></tr>'
+                )
+
+    return f'''
+  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
+  <tr><td style="background:#fff;padding:24px 32px;">
+    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; HubSpot Meetings &mdash; {wl} ({total} meetings)</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bfdbfe;border-radius:8px;overflow:hidden;">
+      <tr style="background:#eff6ff;">{meeting_th}</tr>{rows}
     </table>
   </td></tr>'''
 
@@ -579,8 +666,7 @@ def _apollo_html(apollo_data):
                 f'<td style="padding:7px 12px;font-size:13px;color:#166534;font-weight:600;text-align:center;">{s["replied"]}</td>'
                 f'<td style="padding:7px 12px;font-size:12px;color:#64748b;text-align:center;">{reply_pct}</td>'
                 f'<td style="padding:7px 12px;font-size:12px;color:#b45309;text-align:center;">{s["bounced"]} ({bounce_pct})</td>'
-                f'</tr>'
-                f'{replier_row}'
+                f'</tr>{replier_row}'
             )
 
         cards += f'''
@@ -633,63 +719,24 @@ def format_html(data, calendar_days, apollo_data=None):
             close_str = close_dt.strftime('%d %b %Y')
         except Exception:
             close_str = '-'
-        col   = 'green' if silence <= 7 else 'blue'
-        label = f'active {silence}d ago'
-        co    = '-' if _is_niroggyan(company) else (company or '-')
+        col = 'green' if silence <= 7 else 'blue'
+        co  = '-' if _is_niroggyan(company) else (company or '-')
         return (
             f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;font-weight:500;">{name}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{co}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;text-align:center;">{badge(label, col)}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{close_str}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f8fafc;font-size:13px;color:#1e293b;font-weight:500;">{name}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{co}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f8fafc;text-align:center;">{badge(f"active {silence}d ago", col)}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f8fafc;font-size:12px;color:#64748b;">{close_str}</td>'
             f'</tr>'
         )
 
     active_rows = ''.join(deal_row(d, s, c) for d, s, c in data['active_deals'])
-
     deal_th = (
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Deal</th>'
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>'
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:center;font-weight:600;">Activity</th>'
         '<th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Close Date</th>'
     )
-
-    def build_meeting_rows(meeting_list, border_color='#f0f9ff'):
-        rows = ''
-        for m, company, phone, agenda, stage, source in meeting_list:
-            p        = m['properties']
-            title    = p.get('hs_meeting_title', 'Meeting')
-            time_str = parse_meeting_time(p.get('hs_meeting_start_time'))
-            badges   = ''
-            if stage:
-                badges += (f'<span style="display:inline-block;padding:1px 7px;border-radius:10px;'
-                           f'background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;'
-                           f'margin-left:6px;">{stage}</span>')
-            if source:
-                clr = ('#dcfce7', '#166534') if source == 'Inbound' else ('#f1f5f9', '#475569')
-                badges += (f'<span style="display:inline-block;padding:1px 7px;border-radius:10px;'
-                           f'background:{clr[0]};color:{clr[1]};font-size:10px;font-weight:700;'
-                           f'margin-left:4px;">{source}</span>')
-            bottom = f'border-bottom:1px solid {border_color};' if not agenda else ''
-            rows  += (
-                f'<tr>'
-                f'<td style="padding:10px 14px;{bottom}font-size:13px;color:#1e293b;">{title}{badges}</td>'
-                f'<td style="padding:10px 14px;{bottom}font-size:12px;color:#64748b;">{company}</td>'
-                f'<td style="padding:10px 14px;{bottom}font-size:12px;color:#64748b;">{time_str} IST</td>'
-                f'<td style="padding:10px 14px;{bottom}font-size:12px;color:#1e293b;font-weight:500;">{phone}</td>'
-                f'</tr>'
-            )
-            if agenda:
-                rows += (
-                    f'<tr><td colspan="4" style="padding:3px 14px 8px 20px;'
-                    f'border-bottom:1px solid {border_color};font-size:11px;color:#475569;'
-                    f'font-style:italic;background:#fafbfc;">'
-                    f'Agenda: {agenda}</td></tr>'
-                )
-        return rows
-
-    meeting_rows          = build_meeting_rows(data['meetings'])
-    meeting_tomorrow_rows = build_meeting_rows(data['meetings_tomorrow'], '#f0fdf4')
 
     company_rows = ''
     for c in data['active_companies']:
@@ -700,38 +747,12 @@ def format_html(data, calendar_days, apollo_data=None):
         col          = 'green' if last_contact <= 7 else 'yellow'
         company_rows += (
             f'<tr>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0fdf4;font-size:13px;color:#1e293b;font-weight:500;">{p.get("name","-")}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0fdf4;text-align:center;">{badge(f"{last_contact}d ago", col)}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0fdf4;font-size:12px;color:#64748b;">{last_call}</td>'
-            f'<td style="padding:10px 14px;border-bottom:1px solid #f0fdf4;font-size:12px;color:#64748b;">{stage}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f0fdf4;font-size:13px;color:#1e293b;font-weight:500;">{p.get("name","-")}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f0fdf4;text-align:center;">{badge(f"{last_contact}d ago", col)}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f0fdf4;font-size:12px;color:#64748b;">{last_call}</td>'
+            f'<td style="padding:9px 14px;border-bottom:1px solid #f0fdf4;font-size:12px;color:#64748b;">{stage}</td>'
             f'</tr>'
         )
-
-    meeting_th = '''
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Title</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Company</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Time (IST)</th>
-        <th style="padding:8px 14px;font-size:11px;color:#64748b;text-align:left;font-weight:600;">Phone</th>'''
-
-    today_block = f'''
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:14px;">&#9632; HubSpot Meetings Today &mdash; {data["date"]} ({stats["meetings_count"]})</div>
-    ''' + (f'''<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bfdbfe;border-radius:8px;overflow:hidden;">
-      <tr style="background:#eff6ff;">{meeting_th}</tr>{meeting_rows}
-    </table>''' if data['meetings'] else '<p style="font-size:13px;color:#94a3b8;margin:0 0 4px;">No meetings scheduled for today.</p>')
-
-    tmrw_count = len(data['meetings_tomorrow'])
-    tmrw_block = f'''
-    <div style="font-size:12px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:1.5px;margin:20px 0 14px;">&#9632; HubSpot Meetings Tomorrow &mdash; {data["tomorrow_date"]} ({tmrw_count})</div>
-    ''' + (f'''<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;border-radius:8px;overflow:hidden;">
-      <tr style="background:#f0fdf4;">{meeting_th}</tr>{meeting_tomorrow_rows}
-    </table>''' if data['meetings_tomorrow'] else '<p style="font-size:13px;color:#94a3b8;margin:0;">No meetings scheduled for tomorrow.</p>')
-
-    meetings_section = f'''
-  <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
-  <tr><td style="background:#fff;padding:24px 32px;">
-    {today_block}
-    {tmrw_block}
-  </td></tr>'''
 
     return f'''<!DOCTYPE html>
 <html lang="en">
@@ -767,7 +788,7 @@ def format_html(data, calendar_days, apollo_data=None):
 
   {_calendar_html(calendar_days)}
 
-  {meetings_section}
+  {_hs_meetings_html(data["hs_meetings_by_day"], data["date"])}
 
   <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
 
@@ -822,7 +843,7 @@ class PulsePDF(FPDF):
         self.set_y(-12)
         self.set_font('Helvetica', 'I', 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 8, pdf_safe(f'NirogGyan Daily Pulse - {NOW.strftime("%d %B %Y")}'), align='C')
+        self.cell(0, 8, pdf_safe(f'NirogGyan Daily Pulse - {_today_ist.strftime("%d %B %Y")}'), align='C')
 
     def section_title(self, title):
         self.ln(4)
@@ -846,8 +867,21 @@ class PulsePDF(FPDF):
         self.set_font('Helvetica', '', 9)
         self.set_text_color(30, 41, 59)
         for text, w in cells:
-            self.cell(w, 7, pdf_safe(str(text)[:50]), fill=shade)
+            self.cell(w, 6, pdf_safe(str(text)[:52]), fill=shade)
         self.ln()
+
+    def day_header(self, label, is_today):
+        self.ln(2)
+        if is_today:
+            self.set_fill_color(26, 86, 160)
+            self.set_text_color(255, 255, 255)
+        else:
+            self.set_fill_color(240, 244, 248)
+            self.set_text_color(15, 39, 68)
+        self.set_font('Helvetica', 'B', 8)
+        tag = '  [TODAY]' if is_today else ''
+        self.cell(0, 6, pdf_safe(label.upper() + tag),
+                  fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 
 def format_pdf(data, calendar_days, apollo_data=None):
@@ -873,7 +907,7 @@ def format_pdf(data, calendar_days, apollo_data=None):
         pdf.cell(46, 12, pdf_safe(f'{val}  {label}'), fill=True, align='C')
     pdf.ln(16)
 
-    def page_guard(min_mm=45):
+    def page_guard(min_mm=40):
         if pdf.h - pdf.b_margin - pdf.get_y() < min_mm:
             pdf.add_page()
 
@@ -884,28 +918,58 @@ def format_pdf(data, calendar_days, apollo_data=None):
         except Exception:
             return '-'
 
-    # Calendar section
+    # Google Calendar section
     if calendar_days:
         wl = _week_label()
         pdf.section_title(f"SHWETA'S CALENDAR — {wl}")
         for day_label, events in calendar_days:
-            pdf.ln(2)
-            pdf.set_font('Helvetica', 'B', 8)
-            pdf.set_text_color(15, 39, 68)
-            pdf.set_fill_color(240, 244, 248)
-            pdf.cell(0, 6, pdf_safe(day_label.upper()), fill=True,
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            is_today = (day_label == TODAY_LABEL)
+            page_guard(20)
+            pdf.day_header(day_label, is_today)
             pdf.tbl_header([('Meeting', 95), ('Time', 50), ('External Attendees', 41)])
             for i, ev in enumerate(events):
                 attendees = ', '.join(ev['attendees']) if ev['attendees'] else '-'
                 title     = ev['title'] + (' [Meet]' if ev['meet'] else '')
+                if is_today:
+                    pdf.set_fill_color(240, 246, 255)
                 pdf.tbl_row([
                     (title, 95),
                     (ev['time'].replace(' IST', ''), 50),
                     (attendees, 41),
                 ], shade=(i % 2 == 1))
 
+    # HubSpot meetings section
+    hs_by_day = data['hs_meetings_by_day']
+    if hs_by_day:
+        wl = _week_label()
+        pdf.ln(4)
+        page_guard()
+        pdf.section_title(f'HUBSPOT MEETINGS — {wl}')
+        for day_label, meetings in hs_by_day:
+            is_today = (day_label == TODAY_LABEL)
+            page_guard(20)
+            pdf.day_header(day_label, is_today)
+            pdf.tbl_header([('Title', 58), ('Source', 28), ('Company', 40), ('Time IST', 24), ('Phone', 36)])
+            for i, (m, company, phone, agenda, stage, source) in enumerate(meetings):
+                p        = m['properties']
+                time_str = parse_meeting_time(p.get('hs_meeting_start_time'))
+                lead_src = ' / '.join(filter(None, [stage, source])) or '-'
+                if is_today:
+                    pdf.set_fill_color(240, 246, 255)
+                pdf.tbl_row([
+                    (p.get('hs_meeting_title', 'Meeting'), 58),
+                    (lead_src, 28),
+                    (company, 40),
+                    (time_str, 24),
+                    (phone, 36),
+                ], shade=(i % 2 == 1))
+                if agenda:
+                    pdf.set_font('Helvetica', 'I', 8)
+                    pdf.set_text_color(71, 85, 105)
+                    pdf.multi_cell(0, 5, pdf_safe(f'    Agenda: {agenda}'))
+
     # Active deals
+    pdf.ln(4)
     page_guard()
     pdf.section_title('10 MOST ACTIVE DEALS — RECENTLY ENGAGED')
     pdf.tbl_header([('Deal', 70), ('Company', 55), ('Activity', 35), ('Close Date', 26)])
@@ -934,37 +998,6 @@ def format_pdf(data, calendar_days, apollo_data=None):
             (last_call, 45),
             (stage, 28),
         ], shade=(i % 2 == 1))
-
-    def pdf_meeting_table(title, meeting_list):
-        pdf.ln(4)
-        page_guard()
-        pdf.section_title(title)
-        if not meeting_list:
-            pdf.set_font('Helvetica', 'I', 9)
-            pdf.set_text_color(148, 163, 184)
-            pdf.cell(0, 7, 'No meetings scheduled.', new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            return
-        pdf.tbl_header([('Title', 60), ('Lead / Source', 36), ('Company', 40), ('Time IST', 24), ('Phone', 26)])
-        for i, (m, company, phone, agenda, stage, source) in enumerate(meeting_list):
-            p        = m['properties']
-            time_str = parse_meeting_time(p.get('hs_meeting_start_time'))
-            lead_src = ' / '.join(filter(None, [stage, source])) or '-'
-            pdf.tbl_row([
-                (p.get('hs_meeting_title', 'Meeting'), 60),
-                (lead_src, 36),
-                (company, 40),
-                (time_str, 24),
-                (phone, 26),
-            ], shade=(i % 2 == 1))
-            if agenda:
-                pdf.set_font('Helvetica', 'I', 8)
-                pdf.set_text_color(71, 85, 105)
-                pdf.multi_cell(0, 5, pdf_safe(f'    Agenda: {agenda}'))
-
-    pdf_meeting_table(f'HUBSPOT MEETINGS TODAY — {data["date"]} ({stats["meetings_count"]})',
-                      data['meetings'])
-    pdf_meeting_table(f'HUBSPOT MEETINGS TOMORROW — {data["tomorrow_date"]} ({len(data["meetings_tomorrow"])})',
-                      data['meetings_tomorrow'])
 
     if apollo_data:
         pdf.ln(4)
@@ -1043,13 +1076,13 @@ if __name__ == '__main__':
     print(f'Got {sum(len(e) for _, e in calendar_days)} calendar events across {len(calendar_days)} days\n')
 
     print('Fetching HubSpot data...')
-    (companies, deals, meetings_today, meetings_tomorrow,
+    (companies, deals, meetings_week,
      deal_company_map, meeting_company_map,
      meeting_phone_map, meeting_stage_map) = get_data()
 
     print('Building report data...')
     data = build_report_data(
-        companies, deals, meetings_today, meetings_tomorrow,
+        companies, deals, meetings_week,
         deal_company_map, meeting_company_map,
         meeting_phone_map, meeting_stage_map,
         calendar_days
@@ -1059,9 +1092,10 @@ if __name__ == '__main__':
     apollo_data = get_apollo_data()
 
     print('Generating HTML and PDF...')
+    date_str = data['date']
     html = format_html(data, calendar_days, apollo_data)
     pdf  = format_pdf(data, calendar_days, apollo_data)
 
     print('Sending email...')
-    send_email(f"NirogGyan Daily Pulse - {data['date']}", html, pdf, data['date'])
+    send_email(f"NirogGyan Daily Pulse - {date_str}", html, pdf, date_str)
     print('Done. Email sent.')
