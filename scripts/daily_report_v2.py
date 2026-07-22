@@ -652,14 +652,14 @@ def _ai_briefing_html(briefing):
         bullet_html += (
             f'<div style="display:flex;align-items:flex-start;margin-bottom:10px;">'
             f'<span style="color:#f59e0b;font-size:16px;line-height:1;margin-right:10px;margin-top:1px;">&#9679;</span>'
-            f'<span style="font-size:13px;color:#1e3a5f;line-height:1.6;">{line}</span>'
+            f'<span style="font-size:13px;color:#1e293b;line-height:1.6;">{line}</span>'
             f'</div>'
         )
     return f'''
   <tr><td style="background:#fff;padding:0 32px;"><hr style="border:none;border-top:1px solid #f1f5f9;margin:0;"></td></tr>
   <tr><td style="background:#fff;padding:20px 32px;">
-    <div style="background:linear-gradient(135deg,#0f2744,#1a3a6b);border-radius:10px;padding:20px 24px;">
-      <div style="font-size:11px;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px;">&#9733; AI Morning Briefing</div>
+    <div style="background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid #f59e0b;border-radius:0 8px 8px 0;padding:18px 22px;">
+      <div style="font-size:11px;font-weight:700;color:#0f2744;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px;">&#9733; AI Morning Briefing</div>
       {bullet_html}
     </div>
   </td></tr>'''
@@ -1324,11 +1324,14 @@ def format_pdf(data, calendar_days, ai_briefing='', clickup_tickets=None, apollo
 
 # ── Email ─────────────────────────────────────────────────────────────────────
 
+RECIPIENTS = [RECIPIENT_EMAIL, 'business@niroggyan.com']
+
+
 def send_email(subject, html_body, pdf_bytes, date_str):
     msg            = MIMEMultipart('mixed')
     msg['Subject'] = subject
     msg['From']    = GMAIL_ADDRESS
-    msg['To']      = RECIPIENT_EMAIL
+    msg['To']      = ', '.join(RECIPIENTS)
 
     alt = MIMEMultipart('alternative')
     alt.attach(MIMEText(html_body, 'html'))
@@ -1343,7 +1346,7 @@ def send_email(subject, html_body, pdf_bytes, date_str):
 
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_string())
+        server.sendmail(GMAIL_ADDRESS, RECIPIENTS, msg.as_string())
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
