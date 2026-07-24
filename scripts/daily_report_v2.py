@@ -1324,7 +1324,7 @@ def format_pdf(data, calendar_days, ai_briefing='', clickup_tickets=None, apollo
 
 # ── Email ─────────────────────────────────────────────────────────────────────
 
-RECIPIENTS = [RECIPIENT_EMAIL, 'business@niroggyan.com']
+RECIPIENTS = [RECIPIENT_EMAIL, 'joyneel@niroggyan.com']
 
 
 def send_email(subject, html_body, pdf_bytes, date_str):
